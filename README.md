@@ -52,6 +52,9 @@ pytest --warden --numprocesses=4 --timeout=60
 | `--cov=<source>` | Standard pytest-cov flag — coverage is measured per worker and combined into a single `.coverage` file at the rootdir. |
 | `--warden-history-db` | Path to warden's SQLite timing/outcome store (default: `<rootdir>/.pytest_warden/history.sqlite3`). |
 | `--warden-quarantine-flaky` | A failure on a test whose recent history has both passes and failures reports as `xfail` instead of `failed`, and doesn't fail the build. |
+| `--last-failed` / `--failed-first` | Standard pytest flags — work transparently, since warden never touches collection or pytest's own report hooks. |
+| `--warden-work-stealing` | Use dynamic chunk-based scheduling instead of static LPT batching — workers that finish early pull more work instead of idling. |
+| `--warden-chunk-size` | Chunk size for `--warden-work-stealing` (default: ~4 chunks per worker). |
 
 ### A hard-killed test in your report
 
@@ -65,12 +68,18 @@ never loop a run forever.
 
 ## How it works
 
-- **Scheduling.** Tests are batched by longest-processing-time-first (LPT):
-  each test's historical median duration (from the history store) weights
-  it, and tests are greedily assigned to whichever worker currently has the
-  lightest load — so two historically-slow tests don't end up stacked on
-  the same worker just because of collection order. With no history yet,
-  this degenerates to an even split.
+- **Scheduling.** By default, tests are batched once upfront by
+  longest-processing-time-first (LPT): each test's historical median
+  duration (from the history store) weights it, and tests are greedily
+  assigned to whichever worker currently has the lightest load — so two
+  historically-slow tests don't end up stacked on the same worker just
+  because of collection order. With no history yet, this degenerates to an
+  even split. `--warden-work-stealing` replaces this with dynamic
+  chunk-based dispatch instead: tests are split into small chunks, each
+  chunk is its own worker subprocess, and whichever worker finishes first
+  pulls the next chunk from a shared queue — useful when duration
+  estimates keep being wrong, since static LPT can't rebalance once a
+  batch is already running but work-stealing continuously does.
 - **Supervision.** Each worker subprocess is wrapped in a Job Object the
   moment it's spawned. A companion plugin loaded into the worker
   (`-p pytest_warden.worker`) appends one JSON line per test start/finish to
@@ -109,6 +118,12 @@ never loop a run forever.
 - **Give tests a real `--timeout`.** Without one, a hung test blocks its
   worker indefinitely just like bare pytest would — warden's hard-kill
   guarantee only fires once a timeout is actually configured.
+- **Reach for `--warden-work-stealing` only once plain LPT batching
+  demonstrably isn't enough.** It helps specifically when tests have no
+  history yet, or when a test's duration varies a lot run to run, so a
+  static upfront estimate keeps missing. If your suite has stable,
+  well-established timing history, static LPT batching already balances
+  it and work-stealing just adds chunk-restart overhead for no benefit.
 
 ## Platform notes
 
@@ -135,5 +150,7 @@ real, real crashes, real coverage combining — not mocks.
 
 ## Roadmap
 
-`--last-failed`/`--failed-first` rerun workflows and work-stealing
-scheduling are planned; see `docs/superpowers/plans/`.
+UI Mode (a live web dashboard) is the remaining unplanned item — everything
+else from the original phased plan is implemented. See
+`docs/superpowers/plans/` for implementation notes on rerun workflows and
+work-stealing.
