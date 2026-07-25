@@ -258,49 +258,122 @@ def _run_controller(session):
 
     numprocesses = session.config.getoption("warden_numprocesses")
     timeout = session.config.getoption("warden_timeout")
+    work_stealing = session.config.getoption("warden_work_stealing")
 
     history_store = HistoryStore(_history_db_path(session))
     session.config._warden_history_store = history_store
     try:
-        previously_failed = frozenset(session.config.cache.get("cache/lastfailed", {}))
-        batches = _lpt_batch(node_ids, numprocesses, history_store, previously_failed)
-
         with tempfile.TemporaryDirectory(prefix="pytest-warden-") as tmpdir:
-            worker_count = 0
-            all_workers = []
-
-            workers, worker_count = _run_wave(
-                session, tmpdir, worker_count, batches, timeout
-            )
-            all_workers.extend(workers)
-
-            retry_batches = [
-                [nid for nid in worker.batch if nid not in worker.started_ids]
-                for worker in workers
-            ]
-            retry_batches = [b for b in retry_batches if b]
-
-            if retry_batches and not session.shouldfail:
-                retry_workers, worker_count = _run_wave(
-                    session, tmpdir, worker_count, retry_batches, timeout
+            if work_stealing:
+                worker_count, all_workers = _run_work_stealing(
+                    session, tmpdir, node_ids, numprocesses, timeout, history_store
                 )
-                all_workers.extend(retry_workers)
-                for worker in retry_workers:
-                    still_missing = [
-                        nid for nid in worker.batch if nid not in worker.started_ids
-                    ]
-                    for nid in still_missing:
-                        _report_never_ran(
-                            session,
-                            nid,
-                            "warden: worker never reached this test even after one retry",
-                        )
+            else:
+                worker_count, all_workers = _run_static_lpt(
+                    session, tmpdir, node_ids, numprocesses, timeout, history_store
+                )
 
             session.config._warden_worker_count = worker_count
             _combine_coverage(session, all_workers)
             _record_history(session, history_store)
     finally:
         history_store.close()
+
+
+def _run_static_lpt(session, tmpdir, node_ids, numprocesses, timeout, history_store):
+    previously_failed = frozenset(session.config.cache.get("cache/lastfailed", {}))
+    batches = _lpt_batch(node_ids, numprocesses, history_store, previously_failed)
+
+    worker_count = 0
+    all_workers = []
+
+    workers, worker_count = _run_wave(session, tmpdir, worker_count, batches, timeout)
+    all_workers.extend(workers)
+
+    retry_batches = [
+        [nid for nid in worker.batch if nid not in worker.started_ids] for worker in workers
+    ]
+    retry_batches = [b for b in retry_batches if b]
+
+    if retry_batches and not session.shouldfail:
+        retry_workers, worker_count = _run_wave(
+            session, tmpdir, worker_count, retry_batches, timeout
+        )
+        all_workers.extend(retry_workers)
+        for worker in retry_workers:
+            still_missing = [nid for nid in worker.batch if nid not in worker.started_ids]
+            for nid in still_missing:
+                _report_never_ran(
+                    session,
+                    nid,
+                    "warden: worker never reached this test even after one retry",
+                )
+
+    return worker_count, all_workers
+
+
+def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history_store):
+    chunk_size = session.config.getoption("warden_chunk_size") or _default_chunk_size(
+        len(node_ids), numprocesses
+    )
+    # Each queue entry is (batch, is_retry) -- is_retry MUST travel with the
+    # batch through the queue, not just live on the _Worker that ran it, or
+    # a chunk that keeps crashing would get re-inserted as a fresh (untagged)
+    # entry every time and retried forever instead of stopping after one.
+    queue = [(chunk, False) for chunk in _chunk_queue(node_ids, history_store, chunk_size)]
+    n = max(1, min(numprocesses, len(queue)))
+
+    worker_count = 0
+    all_workers = []
+    active = []
+    for _ in range(n):
+        if not queue:
+            break
+        batch, is_retry = queue.pop(0)
+        worker_count, worker = _spawn_chunk_worker(
+            session, tmpdir, worker_count, batch, timeout, is_retry
+        )
+        all_workers.append(worker)
+        active.append(worker)
+
+    while active:
+        still_running = _poll_once(session, active)
+        finished = [w for w in active if w not in still_running]
+
+        for worker in finished:
+            worker.job.close()
+            remainder = [nid for nid in worker.batch if nid not in worker.started_ids]
+            if remainder and not worker.is_retry and not session.shouldfail:
+                queue.insert(0, (remainder, True))
+            elif remainder:
+                for nid in remainder:
+                    _report_never_ran(
+                        session,
+                        nid,
+                        "warden: worker never reached this test even after one retry",
+                    )
+
+        active = still_running
+        if not session.shouldfail:
+            while queue and len(active) < n:
+                batch, is_retry = queue.pop(0)
+                worker_count, worker = _spawn_chunk_worker(
+                    session, tmpdir, worker_count, batch, timeout, is_retry
+                )
+                all_workers.append(worker)
+                active.append(worker)
+
+        if session.shouldfail and active:
+            for worker in active:
+                worker.job.terminate()
+            for worker in active:
+                worker.proc.wait()
+            active = []
+
+        if active:
+            time.sleep(_POLL_INTERVAL)
+
+    return worker_count, all_workers
 
 
 def _run_wave(session, tmpdir, worker_count_start, batches, timeout):
