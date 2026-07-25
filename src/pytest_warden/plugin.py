@@ -234,13 +234,16 @@ def _spawn_worker(session, batch, progress_path, cov_data_file):
 
 
 class _Worker:
-    def __init__(self, proc, job, progress_path, timeout, batch, cov_data_file=None):
+    def __init__(
+        self, proc, job, progress_path, timeout, batch, cov_data_file=None, is_retry=False
+    ):
         self.proc = proc
         self.job = job
         self.progress_path = progress_path
         self.timeout = timeout
         self.batch = batch
         self.cov_data_file = cov_data_file
+        self.is_retry = is_retry
         self.lines_consumed = 0
         self.deadline = time.monotonic() + timeout if timeout else None
         self.killed = False
@@ -322,6 +325,18 @@ def _run_wave(session, tmpdir, worker_count_start, batches, timeout):
         worker.job.close()
 
     return workers, worker_count
+
+
+def _spawn_chunk_worker(session, tmpdir, worker_count, batch, timeout, is_retry=False):
+    cov_sources = _cov_sources(session)
+    progress_path = os.path.join(tmpdir, f"worker-{worker_count}.jsonl")
+    cov_data_file = (
+        os.path.join(tmpdir, f".coverage.worker-{worker_count}") if cov_sources else None
+    )
+    open(progress_path, "a", encoding="utf-8").close()
+    proc, job = _spawn_worker(session, batch, progress_path, cov_data_file)
+    worker = _Worker(proc, job, progress_path, timeout, batch, cov_data_file, is_retry)
+    return worker_count + 1, worker
 
 
 def _combine_coverage(session, workers):
