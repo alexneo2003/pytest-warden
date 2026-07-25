@@ -70,3 +70,50 @@ def test_work_stealing_keeps_all_workers_busy_until_the_queue_drains(pytester):
 
     result.assert_outcomes(passed=4)
     assert elapsed < 1.15, f"took {elapsed}s -- looks like both slow tests ran sequentially"
+
+
+def test_work_stealing_survives_a_crash_in_a_single_test_chunk(pytester):
+    pytester.makepyfile(
+        test_mod="""
+        import os
+
+        def test_a():
+            assert True
+
+        def test_b():
+            os._exit(70)  # always crashes -- its own whole chunk at size 1
+
+        def test_c():
+            assert True
+        """
+    )
+    result = pytester.runpytest(
+        "--warden", "--numprocesses=1", "--warden-work-stealing", "--warden-chunk-size=1"
+    )
+    result.assert_outcomes(passed=2, failed=1)
+
+
+def test_work_stealing_retries_the_never_started_remainder_of_a_crashed_chunk(pytester):
+    pytester.makepyfile(
+        test_mod="""
+        import os
+
+        def test_a():
+            assert True
+
+        def test_b():
+            os._exit(70)  # crashes before test_c in the same chunk ever starts
+
+        def test_c():
+            assert True
+        """
+    )
+    # chunk_size=3 puts all three tests in ONE chunk together -- test_a runs
+    # and passes, test_b crashes while in flight (reported failed directly,
+    # not retried), and test_c never gets a logstart in this attempt at all,
+    # making it the genuine "never-started remainder" that should get
+    # exactly one retry on a fresh chunk-worker.
+    result = pytester.runpytest(
+        "--warden", "--numprocesses=1", "--warden-work-stealing", "--warden-chunk-size=3"
+    )
+    result.assert_outcomes(passed=2, failed=1)
