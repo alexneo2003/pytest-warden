@@ -58,6 +58,23 @@ def pytest_addoption(parser):
         help="A failure on a test whose recent history has both passes and "
         "failures is reported as xfail instead of failed, and doesn't fail the build.",
     )
+    group.addoption(
+        "--warden-work-stealing",
+        dest="warden_work_stealing",
+        action="store_true",
+        default=False,
+        help="Use dynamic chunk-based work-stealing instead of static LPT "
+        "batching -- workers that finish early pull more work instead of idling.",
+    )
+    group.addoption(
+        "--warden-chunk-size",
+        dest="warden_chunk_size",
+        action="store",
+        type=int,
+        default=None,
+        help="Chunk size for --warden-work-stealing (default: total tests "
+        "divided across roughly 4 chunks per worker).",
+    )
 
 
 class _HistoryCollector:
