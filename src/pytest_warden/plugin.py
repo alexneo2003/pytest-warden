@@ -312,42 +312,46 @@ def _combine_coverage(session, workers):
     session.config._warden_cov_data_file = combined_path
 
 
-def _supervise(session, workers):
-    pending = list(workers)
-    while pending:
-        now = time.monotonic()
-        still_pending = []
-        for worker in pending:
-            new_lines = _read_new_lines(worker)
-            if new_lines:
-                if worker.timeout:
-                    worker.deadline = now + worker.timeout
-                for line in new_lines:
-                    _replay_event(session, worker, json.loads(line))
+def _poll_once(session, workers):
+    now = time.monotonic()
+    still_pending = []
+    for worker in workers:
+        new_lines = _read_new_lines(worker)
+        if new_lines:
+            if worker.timeout:
+                worker.deadline = now + worker.timeout
+            for line in new_lines:
+                _replay_event(session, worker, json.loads(line))
 
-            if worker.proc.poll() is not None:
-                for line in _read_new_lines(worker):
-                    _replay_event(session, worker, json.loads(line))
-                if worker.current is not None:
-                    code = worker.proc.returncode
-                    _report_incident(
-                        session,
-                        worker,
-                        f"warden: worker exited unexpectedly (code {code}) while running this test",
-                    )
-                continue
-
-            if worker.deadline is not None and now > worker.deadline and not worker.killed:
-                worker.killed = True
-                worker.job.terminate()
+        if worker.proc.poll() is not None:
+            for line in _read_new_lines(worker):
+                _replay_event(session, worker, json.loads(line))
+            if worker.current is not None:
+                code = worker.proc.returncode
                 _report_incident(
                     session,
                     worker,
-                    f"warden: hard-killed after exceeding {worker.timeout}s timeout",
+                    f"warden: worker exited unexpectedly (code {code}) while running this test",
                 )
+            continue
 
-            still_pending.append(worker)
-        pending = still_pending
+        if worker.deadline is not None and now > worker.deadline and not worker.killed:
+            worker.killed = True
+            worker.job.terminate()
+            _report_incident(
+                session,
+                worker,
+                f"warden: hard-killed after exceeding {worker.timeout}s timeout",
+            )
+
+        still_pending.append(worker)
+    return still_pending
+
+
+def _supervise(session, workers):
+    pending = list(workers)
+    while pending:
+        pending = _poll_once(session, pending)
 
         if session.shouldfail and pending:
             for worker in pending:
