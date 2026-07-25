@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -134,6 +135,20 @@ def _lpt_batch(node_ids, numprocesses, history_store, previously_failed=frozense
         batches[i].append(node_id)
         loads[i] += weights[node_id]
     return [batch for batch in batches if batch]
+
+
+def _default_chunk_size(total, numprocesses):
+    n = max(1, numprocesses)
+    return max(1, math.ceil(total / (n * 4)))
+
+
+def _chunk_queue(node_ids, history_store, chunk_size):
+    weights = {}
+    for node_id in node_ids:
+        durations = history_store.get_durations(node_id, window=_HISTORY_WINDOW)
+        weights[node_id] = statistics.median(durations) if durations else _DEFAULT_WEIGHT
+    order = sorted(node_ids, key=lambda nid: weights[nid], reverse=True)
+    return [order[i : i + chunk_size] for i in range(0, len(order), chunk_size)]
 
 
 @dataclass
