@@ -96,14 +96,20 @@ def _history_db_path(session):
     return str(session.config.rootpath / ".pytest_warden" / "history.sqlite3")
 
 
-def _lpt_batch(node_ids, numprocesses, history_store):
+def _lpt_batch(node_ids, numprocesses, history_store, previously_failed=frozenset()):
     n = max(1, min(numprocesses, len(node_ids)))
     weights = {}
     for node_id in node_ids:
         durations = history_store.get_durations(node_id, window=_HISTORY_WINDOW)
         weights[node_id] = statistics.median(durations) if durations else _DEFAULT_WEIGHT
 
-    order = sorted(node_ids, key=lambda nid: weights[nid], reverse=True)
+    def sort_key(node_id):
+        # Previously-failed tests sort first (True > False), then by weight
+        # descending within each group -- preserves --failed-first's intent
+        # without giving up load-balancing among the rest.
+        return (node_id in previously_failed, weights[node_id])
+
+    order = sorted(node_ids, key=sort_key, reverse=True)
     loads = [0.0] * n
     batches = [[] for _ in range(n)]
     for node_id in order:
@@ -221,7 +227,8 @@ def _run_controller(session):
     history_store = HistoryStore(_history_db_path(session))
     session.config._warden_history_store = history_store
     try:
-        batches = _lpt_batch(node_ids, numprocesses, history_store)
+        previously_failed = frozenset(session.config.cache.get("cache/lastfailed", {}))
+        batches = _lpt_batch(node_ids, numprocesses, history_store, previously_failed)
 
         with tempfile.TemporaryDirectory(prefix="pytest-warden-") as tmpdir:
             worker_count = 0
