@@ -46,8 +46,10 @@ def pytest_addoption(parser):
         type=str,
         default="1",
         help="Number of hard-killable pytest worker subprocesses to distribute "
-        "tests across. Accepts a positive integer, or a percentage of the "
-        "available CPU count (e.g. '50%%').",
+        "tests across. Accepts a positive integer, a percentage of the "
+        "available CPU count (e.g. '50%%'), 'auto' (physical CPU count, "
+        "requires psutil, falls back to logical), or 'logical' (logical "
+        "CPU count).",
     )
     group.addoption(
         "--timeout",
@@ -233,12 +235,30 @@ def _available_cpu_count():
     return os.cpu_count() or 1
 
 
-def _resolve_numprocesses(raw, cpu_count_fn=None):
+def _detect_physical_cpu_count():
+    # A pure probe: None means "couldn't tell" (psutil missing, or unable to
+    # determine physical count), leaving the fallback decision to the caller
+    # rather than baking one in here.
+    try:
+        import psutil
+    except ImportError:
+        return None
+    return psutil.cpu_count(logical=False) or None
+
+
+def _resolve_numprocesses(raw, cpu_count_fn=None, physical_cpu_count_fn=None):
     cpu_count_fn = cpu_count_fn or _available_cpu_count
+    physical_cpu_count_fn = physical_cpu_count_fn or _detect_physical_cpu_count
     text = raw.strip()
     error = pytest.UsageError(
-        f"--numprocesses must be a positive integer or a percentage like '50%', got {raw!r}"
+        "--numprocesses must be a positive integer, a percentage like '50%', "
+        f"'auto', or 'logical', got {raw!r}"
     )
+    lowered = text.lower()
+    if lowered == "auto":
+        return physical_cpu_count_fn() or cpu_count_fn()
+    if lowered == "logical":
+        return cpu_count_fn()
     if text.endswith("%"):
         try:
             pct = float(text[:-1])

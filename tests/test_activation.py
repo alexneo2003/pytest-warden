@@ -35,6 +35,38 @@ def test_resolve_numprocesses_rejects_zero_and_negative_percentage():
             _resolve_numprocesses(raw, cpu_count_fn=lambda: 8)
 
 
+def test_resolve_numprocesses_auto_uses_physical_cpu_count():
+    assert _resolve_numprocesses("auto", physical_cpu_count_fn=lambda: 4) == 4
+
+
+def test_resolve_numprocesses_auto_is_case_insensitive():
+    assert _resolve_numprocesses("Auto", physical_cpu_count_fn=lambda: 4) == 4
+    assert _resolve_numprocesses("AUTO", physical_cpu_count_fn=lambda: 4) == 4
+
+
+def test_resolve_numprocesses_auto_falls_back_to_logical_without_psutil():
+    assert (
+        _resolve_numprocesses("auto", cpu_count_fn=lambda: 8, physical_cpu_count_fn=lambda: None)
+        == 8
+    )
+
+
+def test_resolve_numprocesses_logical_uses_cpu_count():
+    assert _resolve_numprocesses("logical", cpu_count_fn=lambda: 8) == 8
+
+
+def test_resolve_numprocesses_logical_is_case_insensitive():
+    assert _resolve_numprocesses("Logical", cpu_count_fn=lambda: 8) == 8
+
+
+def test_detect_physical_cpu_count_returns_positive_int_when_psutil_installed():
+    pytest.importorskip("psutil")
+    from pytest_warden.plugin import _detect_physical_cpu_count
+
+    count = _detect_physical_cpu_count()
+    assert count is None or count > 0
+
+
 def test_warden_flag_is_recognized(pytester):
     pytester.makepyfile(
         """
