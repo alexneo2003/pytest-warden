@@ -7,6 +7,7 @@ requires-python = ">=3.9"
 dependencies = [
     "pytest>=7",
     "coverage>=7",
+    "pywin32; sys_platform == 'win32'",
 ]
 
 [project.entry-points.pytest11]
