@@ -148,6 +148,40 @@ def test_worker_raw_terminal_output_does_not_leak_into_the_controllers_own_outpu
     )
 
 
+def test_parametrized_test_ids_with_special_characters_survive_the_worker_round_trip(pytester):
+    pytester.makepyfile(
+        test_mod="""
+        import pytest
+
+        @pytest.mark.parametrize("value", ["plain", "with space", "with-dash", "unicode-\\u00e9"])
+        def test_value(value):
+            assert isinstance(value, str)
+        """
+    )
+    bare = pytester.runpytest()
+    warden = pytester.runpytest("--warden")
+    assert warden.ret == bare.ret
+    warden.assert_outcomes(passed=4)
+
+
+def test_teardown_phase_error_is_reported_correctly_through_warden(pytester):
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.fixture
+        def broken_teardown():
+            yield
+            raise RuntimeError("teardown blew up")
+
+        def test_uses_it(broken_teardown):
+            assert True
+        """
+    )
+    result = pytester.runpytest("--warden")
+    result.assert_outcomes(passed=1, errors=1)
+
+
 def test_third_party_logreport_consumer_plugin_observes_each_report_twice_known_limitation(
     pytester,
 ):

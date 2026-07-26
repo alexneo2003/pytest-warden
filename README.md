@@ -146,6 +146,14 @@ never loop a run forever.
   reporting plugin's side effects must fire exactly once under warden,
   gate it behind a CLI flag (so it only activates in the controller)
   rather than an always-on `conftest.py` hookimpl.
+- **Know that session/module/class-scoped fixtures are scoped per worker,
+  not once for the whole run.** Each worker is a fully separate `pytest`
+  subprocess, so a `session`- or `module`-scoped fixture's state is created
+  independently in every worker that ends up running part of that module —
+  the same trade-off `pytest-xdist` has. If a fixture's setup must run
+  exactly once across an entire warden invocation (not once per worker),
+  it needs external coordination (a file lock, a shared service) — warden
+  doesn't provide one itself.
 - **Reach for `--warden-work-stealing` only once plain LPT batching
   demonstrably isn't enough.** It helps specifically when tests have no
   history yet, or when a test's duration varies a lot run to run, so a

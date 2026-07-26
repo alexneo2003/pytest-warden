@@ -113,6 +113,36 @@ def test_many_trivial_tests_on_one_fast_worker_are_all_accounted_for(pytester):
     result.assert_outcomes(passed=60)
 
 
+def test_teardown_finalizer_does_not_run_after_a_hard_kill_documents_the_trade_off(pytester):
+    # Inherent to SIGKILL/TerminateJobObject -- there's no reasonable fix
+    # within this architecture. Documents the trade-off (matching the
+    # existing coverage-loss precedent in test_audit_gaps.py) rather than
+    # asserting a behavior that would require catching an unctachable
+    # signal.
+    pytester.makepyfile(
+        """
+        import time
+
+        import pytest
+
+        @pytest.fixture
+        def marks_cleanup_on_teardown():
+            yield
+            with open("cleanup_ran.txt", "w") as fh:
+                fh.write("yes")
+
+        def test_hangs(marks_cleanup_on_teardown):
+            time.sleep(30)
+        """
+    )
+    result = pytester.runpytest("--warden", "--timeout=1")
+    result.assert_outcomes(failed=1)
+    assert not (pytester.path / "cleanup_ran.txt").exists(), (
+        "a hard kill is a SIGKILL-equivalent -- teardown finalizers cannot run, "
+        "by design; if this ever starts passing, the architecture changed"
+    )
+
+
 def test_no_duplicate_report_for_a_hard_killed_test(pytester):
     pytester.makepyfile(
         """
