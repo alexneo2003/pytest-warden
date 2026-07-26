@@ -11,8 +11,10 @@ real `pytest` subprocesses, wraps each one in a Windows Job Object (with a
 POSIX process-group fallback), and tails a lightweight progress channel to
 detect and hard-kill any subprocess that overruns its timeout. Results are
 merged back through pytest's own real reporting hooks, so junitxml, the
-terminal summary, coverage, and third-party plugins all keep working
-unmodified.
+terminal summary, coverage, `--lf`/`--ff`, and CLI-flag-gated third-party
+plugins all keep working unmodified — see "Best practices" for a caveat on
+plugins that hook into test reporting via `conftest.py` instead of a CLI
+flag.
 
 ## Why
 
@@ -90,8 +92,12 @@ never loop a run forever.
   (`pytest_runtest_logstart` / `pytest_runtest_logreport` /
   `pytest_runtest_logfinish`) against its own top-level session — so
   anything that consumes those hooks (junitxml, terminal reporting,
-  `--lf`/`--ff` caching, most third-party plugins) works exactly as it
-  would in a normal run, without warden needing its own merge logic.
+  `--lf`/`--ff` caching) works exactly as it would in a normal run,
+  without warden needing its own merge logic. Worker subprocesses run
+  fully quiet (`-q`, stdout/stderr discarded) so nothing from a worker's
+  own raw output leaks into the controller's single, replayed terminal
+  report. See "Best practices" below for a caveat on third-party plugins
+  specifically.
 
 ## Best practices
 
@@ -126,6 +132,20 @@ never loop a run forever.
   matters, prefer more, smaller batches (a higher `--numprocesses`, or
   `--warden-work-stealing` with a small `--warden-chunk-size`) so a kill
   only ever costs you one test's worth of coverage data.
+- **Know that conftest-loaded reporting plugins with side effects fire
+  twice, not once.** Each worker is a fully real, independent `pytest`
+  subprocess with the same `conftest.py` (and any auto-registered
+  third-party plugins) loaded as the controller. A hookimpl like
+  `pytest_runtest_logreport` defined in `conftest.py` genuinely executes
+  once for real inside the worker (real execution, real side effect --
+  e.g. writing a file or emitting a metric) and once more when the
+  controller replays that same report through its own hook manager. This
+  is different from CLI-flag-gated plugins (`--junitxml`, the `--lf`/`--ff`
+  cache): their flags are never forwarded to workers, so they only ever
+  run in the controller and observe each result exactly once. If a
+  reporting plugin's side effects must fire exactly once under warden,
+  gate it behind a CLI flag (so it only activates in the controller)
+  rather than an always-on `conftest.py` hookimpl.
 - **Reach for `--warden-work-stealing` only once plain LPT batching
   demonstrably isn't enough.** It helps specifically when tests have no
   history yet, or when a test's duration varies a lot run to run, so a

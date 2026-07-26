@@ -244,6 +244,15 @@ def _spawn_worker(session, batch, progress_path, cov_data_file):
         cwd=str(session.config.rootpath),
         start_new_session=True,
         env=env,
+        # Without this, the worker's own -q terminal output (session
+        # banner, dots, tracebacks, summary line) inherits the controller's
+        # real stdout/stderr fds and prints directly to the terminal, on
+        # top of -- and interleaved with -- the controller's own replayed
+        # reporting for the exact same tests. The replayed report already
+        # carries the real traceback/outcome, so the worker's raw output
+        # is pure duplication, not additional information.
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     job = JobObject()
     job.assign(proc.pid)
