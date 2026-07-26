@@ -1,4 +1,16 @@
 from pytest_warden.history import HistoryStore
+from pytest_warden.plugin import _max_concurrent_slots
+
+
+def test_max_concurrent_slots_uses_numprocesses_not_initial_chunk_count():
+    # A large --warden-chunk-size can mean few initial chunks, but the
+    # concurrency cap should still track numprocesses/total tests, not the
+    # (possibly much smaller) initial chunk count -- otherwise, if a crash
+    # later requeues more, smaller chunks back into the queue, there's no
+    # room to run them concurrently even though numprocesses allows it.
+    assert _max_concurrent_slots(numprocesses=4, total_tests=8) == 4
+    assert _max_concurrent_slots(numprocesses=4, total_tests=2) == 2  # never more than total tests
+    assert _max_concurrent_slots(numprocesses=0, total_tests=8) == 1  # clamped to at least 1
 
 
 def test_quarantining_a_failure_still_records_it_as_failed_in_history(pytester):

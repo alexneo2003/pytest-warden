@@ -312,6 +312,15 @@ def _run_static_lpt(session, tmpdir, node_ids, numprocesses, timeout, history_st
     return worker_count, all_workers
 
 
+def _max_concurrent_slots(numprocesses, total_tests):
+    # Deliberately based on numprocesses/total tests, NOT on the initial
+    # chunk count -- a large --warden-chunk-size can mean few chunks up
+    # front, but a crash later can requeue smaller remainder chunks back
+    # into the queue, and the concurrency cap must not have been
+    # permanently pinned to that smaller initial count in the meantime.
+    return max(1, min(numprocesses, total_tests))
+
+
 def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history_store):
     chunk_size = session.config.getoption("warden_chunk_size")
     if chunk_size is None:
@@ -330,7 +339,7 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
     # a chunk that keeps crashing would get re-inserted as a fresh (untagged)
     # entry every time and retried forever instead of stopping after one.
     queue = [(chunk, False) for chunk in _chunk_queue(node_ids, history_store, chunk_size)]
-    n = max(1, min(numprocesses, len(queue)))
+    n = _max_concurrent_slots(numprocesses, len(node_ids))
 
     worker_count = 0
     all_workers = []
