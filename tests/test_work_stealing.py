@@ -38,16 +38,21 @@ def test_work_stealing_keeps_all_workers_busy_until_the_queue_drains(pytester):
     # and 2 means static batching would stack them on the SAME worker,
     # running one after the other. Work-stealing dispatches one test per
     # chunk, so the second slow test lands on whichever slot happens to be
-    # free next -- here, the other slot, letting both slow tests run
-    # concurrently instead of sequentially.
+    # free next -- here, the other slot, letting both slow tests run on
+    # separate worker subprocesses instead of one after another on the
+    # same one.
     #
-    # Proven via overlapping start/end timestamps rather than a wall-clock
-    # threshold -- a fixed threshold is immune to nothing: a loaded/slow CI
-    # runner (Windows CI especially tends to have much higher
-    # subprocess-spawn overhead than local dev) could blow past a tight
-    # absolute threshold even when the scheduling itself is correct.
+    # Proven via each test recording its own process id rather than via
+    # overlapping timestamps or a wall-clock threshold -- both of those
+    # are sensitive to subprocess-spawn latency, which real Windows CI
+    # measurements showed can be over a second (much higher than local
+    # POSIX dev), enough to make even correctly-scheduled slow_b start
+    # after slow_a already finished. Which worker (process) ran each test
+    # is a direct, timing-independent fact -- immune to how fast or slow
+    # any given runner happens to spawn subprocesses.
     pytester.makepyfile(
         test_mod="""
+        import os
         import time
 
         def _record(name, value):
@@ -55,17 +60,15 @@ def test_work_stealing_keeps_all_workers_busy_until_the_queue_drains(pytester):
                 fh.write(f"{name} {value}\\n")
 
         def test_slow_a():
-            _record("a_start", time.monotonic())
-            time.sleep(0.6)
-            _record("a_end", time.monotonic())
+            _record("a_pid", os.getpid())
+            time.sleep(0.2)
 
         def test_fast_1():
             pass
 
         def test_slow_b():
-            _record("b_start", time.monotonic())
-            time.sleep(0.6)
-            _record("b_end", time.monotonic())
+            _record("b_pid", os.getpid())
+            time.sleep(0.2)
 
         def test_fast_2():
             pass
@@ -80,13 +83,10 @@ def test_work_stealing_keeps_all_workers_busy_until_the_queue_drains(pytester):
     result.assert_outcomes(passed=4)
 
     timing = dict(line.split() for line in (pytester.path / "timing.txt").read_text().splitlines())
-    a_start, a_end = float(timing["a_start"]), float(timing["a_end"])
-    b_start, b_end = float(timing["b_start"]), float(timing["b_end"])
-    overlap = min(a_end, b_end) - max(a_start, b_start)
-    assert overlap > 0, (
-        f"test_slow_a and test_slow_b did not run concurrently -- looks like "
-        f"they ran sequentially on the same worker: a=({a_start}, {a_end}) "
-        f"b=({b_start}, {b_end})"
+    assert timing["a_pid"] != timing["b_pid"], (
+        f"test_slow_a and test_slow_b ran in the same worker process "
+        f"(pid {timing['a_pid']}) -- looks like they were stacked onto the "
+        f"same worker instead of being dispatched to separate ones"
     )
 
 
