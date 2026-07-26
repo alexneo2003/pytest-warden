@@ -272,3 +272,165 @@ def test_zero_chunk_size_is_rejected_instead_of_silently_substituting_the_defaul
     )
     assert result.ret != 0
     result.stderr.fnmatch_lines(["*--warden-chunk-size must be a positive integer*"])
+
+
+# --- Round 2: feature parity between the two scheduling modes ---
+#
+# --warden-work-stealing is a newer, separate code path from the default
+# static-LPT one (_run_work_stealing vs _run_static_lpt/_run_wave). Several
+# cross-cutting features were built and tested against the static path
+# only; this section checks whether they actually carry over.
+
+
+def test_work_stealing_also_prioritizes_previously_failed_tests_for_failed_first(pytester):
+    # _lpt_batch (static mode) was fixed to prioritize previously-failed
+    # node ids (see test_rerun_workflows.py) -- but _run_work_stealing
+    # calls _chunk_queue, a completely separate function that never
+    # learned about previously_failed at all. Same order-recording
+    # technique as the static-mode version: -q mode never prints a
+    # *passing* test's name, so scraping stdout would be a false-positive
+    # waiting to happen.
+    pytester.makepyfile(
+        test_mod="""
+        import time
+
+        def _record(name):
+            with open("order.txt", "a") as fh:
+                fh.write(name + "\\n")
+
+        def test_a():
+            time.sleep(0.2)  # recorded as slower -- would sort first by weight alone
+            _record("test_a")
+
+        def test_b():
+            _record("test_b")
+            assert False  # previously failed, but faster than test_a
+        """
+    )
+    first = pytester.runpytest("--warden", "--numprocesses=1")
+    first.assert_outcomes(passed=1, failed=1)
+
+    (pytester.path / "order.txt").unlink()
+
+    second = pytester.runpytest(
+        "--warden",
+        "--numprocesses=1",
+        "--failed-first",
+        "--warden-work-stealing",
+        "--warden-chunk-size=2",
+    )
+    order = (pytester.path / "order.txt").read_text().splitlines()
+    assert order[0] == "test_b", (
+        f"expected test_b (failed-first) to run before test_a under "
+        f"work-stealing too, got: {order}"
+    )
+
+
+def test_maxfail_stops_work_stealing_early(pytester):
+    # _run_work_stealing has its own, separate shouldfail-handling branch
+    # from _supervise's (static mode) -- never exercised by any existing
+    # test.
+    pytester.makepyfile(
+        test_mod="""
+        def test_a():
+            assert False
+
+        def test_b():
+            assert False
+
+        def test_c():
+            assert True
+        """
+    )
+    result = pytester.runpytest(
+        "--warden",
+        "--numprocesses=1",
+        "--maxfail=1",
+        "--warden-work-stealing",
+        "--warden-chunk-size=1",
+    )
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*stopping after 1 failures*"])
+
+
+def test_quarantine_works_under_work_stealing(pytester):
+    # _maybe_quarantine is only reached via _replay_event, which IS shared
+    # by both scheduling modes through _poll_once -- so this should already
+    # work, but the combination was never actually exercised by a test.
+    pytester.makepyfile(
+        test_mod="""
+        import os
+
+        def test_flaky():
+            counter_file = "invocations.txt"
+            n = 0
+            if os.path.exists(counter_file):
+                n = int(open(counter_file).read())
+            n += 1
+            open(counter_file, "w").write(str(n))
+            assert n % 2 == 1
+        """
+    )
+    history_db = str(pytester.path / "history.sqlite3")
+
+    pytester.runpytest(
+        "--warden", f"--warden-history-db={history_db}", "--warden-work-stealing"
+    ).assert_outcomes(passed=1)
+    pytester.runpytest(
+        "--warden", f"--warden-history-db={history_db}", "--warden-work-stealing"
+    ).assert_outcomes(failed=1)
+    pytester.runpytest(
+        "--warden", f"--warden-history-db={history_db}", "--warden-work-stealing"
+    ).assert_outcomes(passed=1)
+
+    result = pytester.runpytest(
+        "--warden",
+        f"--warden-history-db={history_db}",
+        "--warden-work-stealing",
+        "--warden-quarantine-flaky",
+    )
+    assert result.ret == 0
+    result.stdout.fnmatch_lines(["*xfail*"])
+
+
+def test_sigint_terminates_running_workers_under_work_stealing_too(pytester):
+    pytester.makepyfile(
+        test_mod="""
+        import os
+        import time
+
+        def test_hangs():
+            with open("worker.pid", "w") as fh:
+                fh.write(str(os.getpid()))
+            time.sleep(30)
+        """
+    )
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--warden",
+            "--numprocesses=1",
+            "--warden-work-stealing",
+        ],
+        cwd=str(pytester.path),
+    )
+    try:
+        pid_file = pytester.path / "worker.pid"
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pid_file.exists(), "worker never started"
+        worker_pid = int(pid_file.read_text().strip())
+
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=10)
+
+        time.sleep(0.3)
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

@@ -151,12 +151,20 @@ def _default_chunk_size(total, numprocesses):
     return max(1, math.ceil(total / (n * 4)))
 
 
-def _chunk_queue(node_ids, history_store, chunk_size):
+def _chunk_queue(node_ids, history_store, chunk_size, previously_failed=frozenset()):
     weights = {}
     for node_id in node_ids:
         durations = history_store.get_durations(node_id, window=_HISTORY_WINDOW)
         weights[node_id] = statistics.median(durations) if durations else _DEFAULT_WEIGHT
-    order = sorted(node_ids, key=lambda nid: weights[nid], reverse=True)
+
+    def sort_key(node_id):
+        # Same priority rule as _lpt_batch: previously-failed tests sort
+        # first, then by weight -- work-stealing must not lose
+        # --failed-first's intent just because it uses a different
+        # batching function than static mode does.
+        return (node_id in previously_failed, weights[node_id])
+
+    order = sorted(node_ids, key=sort_key, reverse=True)
     return [order[i : i + chunk_size] for i in range(0, len(order), chunk_size)]
 
 
@@ -368,11 +376,15 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
         raise pytest.UsageError(
             f"--warden-chunk-size must be a positive integer, got {chunk_size}"
         )
+    previously_failed = frozenset(session.config.cache.get("cache/lastfailed", {}))
     # Each queue entry is (batch, is_retry) -- is_retry MUST travel with the
     # batch through the queue, not just live on the _Worker that ran it, or
     # a chunk that keeps crashing would get re-inserted as a fresh (untagged)
     # entry every time and retried forever instead of stopping after one.
-    queue = [(chunk, False) for chunk in _chunk_queue(node_ids, history_store, chunk_size)]
+    queue = [
+        (chunk, False)
+        for chunk in _chunk_queue(node_ids, history_store, chunk_size, previously_failed)
+    ]
     n = _max_concurrent_slots(numprocesses, len(node_ids))
 
     worker_count = 0
@@ -416,10 +428,17 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
                 active.append(worker)
 
         if session.shouldfail and active:
+            # Unlike the "finished" branch above, and unlike _run_wave's
+            # static-mode equivalent (which unconditionally closes every
+            # worker's job after _supervise returns, regardless of exit
+            # reason), this path used to leave these handles open --
+            # harmless on POSIX (close() is a no-op there) but a real,
+            # if bounded, handle leak on Windows.
             for worker in active:
                 worker.job.terminate()
             for worker in active:
                 worker.proc.wait()
+                worker.job.close()
             active = []
 
         if active:
