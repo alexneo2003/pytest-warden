@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest something pytest-warden doesn't do yet.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you running into
+      description: >
+        Describe the situation this would help with, not just the feature
+        itself -- e.g. what your suite/CI setup looks like and where it
+        currently falls short.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you want warden to do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Any existing flag, fixture, or workaround you've already tried
+        (see the README's "Best practices" section), and why it doesn't
+        fully cover this.

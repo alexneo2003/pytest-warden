@@ -26,6 +26,7 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.8",
     "ty>=0.0.1a1",
+    "pre-commit>=4",
 ]
 
 [tool.ruff]
@@ -46,6 +47,15 @@ quote-style = "double"
 
 [tool.ty.environment]
 python-version = "3.9"
+# CI's lint job (the only place `ty check` runs today) is pinned to
+# ubuntu-latest -- without this, `ty check` targets whatever platform it's
+# invoked FROM instead, so the same command passes in CI but fails locally
+# on Windows (jobobject.py's `if IS_WINDOWS: import win32api...` becomes a
+# real, unresolvable-stub import once ty assumes win32, since pywin32's
+# native extension modules aren't visible to it the way a regular package
+# would be). Pinning here keeps local and CI results identical regardless
+# of the contributor's own OS.
+python-platform = "linux"
 
 [tool.ty.src]
 include = ["src/pytest_warden"]

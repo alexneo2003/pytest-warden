@@ -253,9 +253,24 @@ not their short aliases.
 ## Development
 
 ```
-uv sync
+uv sync --group dev
 uv run pytest tests/
 ```
+
+Install the pre-commit hooks once per clone so lint/format/type-check
+issues are caught before they reach CI:
+
+```
+uv run pre-commit install
+```
+
+This runs `ruff check --fix`, `ruff format`, `ty check`, and a few basic
+hygiene checks (trailing whitespace, merge-conflict markers, etc.) on
+every commit — the same checks CI's `lint` job runs, so a failure here is
+a failure there too. The real test suite (`pytest tests/`) is deliberately
+*not* part of the pre-commit hook: it spawns real subprocesses and real
+timeouts/hangs by design, which makes it too slow for every commit — run
+it directly, or let CI run it on push.
 
 Every feature is verified with real subprocesses — real hangs killed for
 real, real crashes, real coverage combining — not mocks.

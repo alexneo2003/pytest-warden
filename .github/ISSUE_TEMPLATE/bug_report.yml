@@ -1,0 +1,68 @@
+name: Bug report
+description: Something under --warden isn't behaving as documented.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you see instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: >
+        A small test file plus the exact `pytest --warden ...` command line
+        that reproduces it. Issues without a reproduction are much harder to
+        act on.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: >
+        Terminal output, traceback, or (if relevant) junitxml showing the
+        problem. Run with `-v` if the default output doesn't show enough.
+      render: text
+
+  - type: input
+    id: warden-version
+    attributes:
+      label: pytest-warden version
+      description: "`pip show pytest-warden` or `uv pip show pytest-warden`"
+    validations:
+      required: true
+
+  - type: input
+    id: pytest-version
+    attributes:
+      label: pytest version
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: >
+        Behavior legitimately differs here -- Windows uses Job Objects,
+        everywhere else uses a POSIX process-group fallback.
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: flags
+    attributes:
+      label: Relevant --warden flags
+      description: e.g. --numprocesses=4 --timeout=60 --warden-work-stealing
