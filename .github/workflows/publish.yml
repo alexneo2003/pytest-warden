@@ -1,0 +1,158 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_strategy:
+        description: "Version increment strategy (ignored for the very first release, which ships pyproject.toml's current version as-is)"
+        required: false
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  verify:
+    name: Verify main is releasable
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --group dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check
+      - run: uv run pytest tests/ -v
+
+  release:
+    name: Bump version, update changelog, tag, publish
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write # required for PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Calculate release version
+        id: version
+        run: |
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -v -- '-' | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            # Nothing has ever shipped -- publish whatever version is
+            # already committed in pyproject.toml as-is (its CHANGELOG.md
+            # entry was hand-written for this exact version already).
+            NEW_VERSION="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')"
+          else
+            BASE="${LATEST_TAG#v}"
+            MAJOR=$(echo "$BASE" | cut -d. -f1)
+            MINOR=$(echo "$BASE" | cut -d. -f2)
+            PATCH=$(echo "$BASE" | cut -d. -f3)
+            case "${{ inputs.version_strategy }}" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              *) PATCH=$((PATCH + 1)) ;;
+            esac
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          echo "new-version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "previous-tag=${LATEST_TAG:-none}" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$NEW_VERSION (previous: ${LATEST_TAG:-none})"
+
+      - name: Bump pyproject.toml version
+        if: steps.version.outputs.previous-tag != 'none'
+        run: |
+          sed -i -E 's/^version = ".*"/version = "${{ steps.version.outputs.new-version }}"/' pyproject.toml
+          uv lock
+
+      - name: Update CHANGELOG.md
+        if: steps.version.outputs.previous-tag != 'none'
+        run: |
+          # Drop a stale empty "## [Unreleased]" placeholder heading (but
+          # never one that already has real content under it) before
+          # prepending this release's entries above it.
+          awk '
+            /^## \[Unreleased\]$/ { pending=$0; skip_blank=1; next }
+            pending && /^$/ && skip_blank { skip_blank=0; next }
+            pending && /^## \[/ { pending=""; print; next }
+            pending { print pending; if (skip_blank==0) print ""; pending=""; print; next }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.md.tmp
+          mv CHANGELOG.md.tmp CHANGELOG.md
+
+      - name: Prepend this release's entries to CHANGELOG.md
+        if: steps.version.outputs.previous-tag != 'none'
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag v${{ steps.version.outputs.new-version }} --unreleased --prepend CHANGELOG.md
+
+      - name: Render this release's notes
+        id: notes
+        run: |
+          if [ "${{ steps.version.outputs.previous-tag }}" = "none" ]; then
+            # First-ever release: reuse the hand-written CHANGELOG.md
+            # section for this version instead of diffing against a
+            # nonexistent prior tag (which would dump the whole history).
+            awk '
+              /^## \[${{ steps.version.outputs.new-version }}\]/ { found=1; print; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md > /tmp/release-notes.md
+          else
+            uvx git-cliff --config cliff.toml --tag v${{ steps.version.outputs.new-version }} \
+              --unreleased --strip all -o /tmp/release-notes.md
+          fi
+
+      - name: Commit version bump and changelog
+        if: steps.version.outputs.previous-tag != 'none'
+        run: |
+          git add pyproject.toml uv.lock CHANGELOG.md
+          git commit -m "chore(release): v${{ steps.version.outputs.new-version }}"
+
+      - name: Tag release
+        run: git tag -a "v${{ steps.version.outputs.new-version }}" -m "Release v${{ steps.version.outputs.new-version }}"
+
+      - name: Push commit and tag
+        run: |
+          git push origin HEAD:main
+          git push origin "v${{ steps.version.outputs.new-version }}"
+
+      - name: Build package
+        run: uv build
+
+      - name: Check distribution
+        run: uvx twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.new-version }}" \
+            --title "v${{ steps.version.outputs.new-version }}" \
+            --notes-file /tmp/release-notes.md \
+            --latest
