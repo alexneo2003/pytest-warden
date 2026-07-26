@@ -17,6 +17,7 @@ ctrlrunner's multiprocessing.Process worker model.
 """
 
 import contextlib
+import subprocess
 import sys
 import warnings
 
@@ -48,6 +49,7 @@ if IS_WINDOWS:
                 self.handle, win32job.JobObjectExtendedLimitInformation, info
             )
             self._proc_handle = None
+            self._pid = None
 
         def assign(self, pid: int):
             # Least privilege: AssignProcessToJobObject only needs the
@@ -57,28 +59,51 @@ if IS_WINDOWS:
             # terminate() below has a direct fallback on the worker's own
             # PID, independent of Job Object tree termination.
             access = win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE
+            self._pid = pid
             self._proc_handle = win32api.OpenProcess(access, False, pid)
             win32job.AssignProcessToJobObject(self.handle, self._proc_handle)
 
         def terminate(self):
             """Hard-kills every process currently in the job. Also
-            terminates the directly-assigned process by its own handle as a
-            fallback -- job-based tree termination can be blocked by an
-            ambient outer Job Object's own nesting/breakaway policy
-            (observed in practice on GitHub Actions' windows-latest
-            runners) without raising a Python-visible error, silently
-            leaving the process alive."""
+            terminates the directly-assigned process by its own handle, and
+            runs `taskkill /F /T` against its PID, as independent fallbacks
+            -- job-based tree termination can be blocked by an ambient
+            outer Job Object's own nesting/breakaway policy (observed in
+            practice on GitHub Actions' windows-latest runners) without
+            raising a Python-visible error, silently leaving the process
+            alive."""
             # TEMPORARY diagnostic: real Windows CI shows every single kill
             # in the suite needing all 3 verify/retry attempts in
             # _terminate_and_verify, with two specific tests
             # (single-worker, no children, pure time.sleep(30)) still never
-            # actually dying within the full 30s sleep -- yet other, more
-            # complex hard-kill tests (multi-worker, child-spawning) in the
-            # same run recover and pass. That split isn't explained by the
-            # "swallowed by an ambient job's breakaway policy" theory alone
-            # -- surface the actual Win32 error/exception instead of
-            # silently suppressing it, to find out what's really happening
-            # in this specific shape of failure. Remove once understood.
+            # actually dying within the full 30s sleep -- yet TerminateJobObject
+            # never raised an exception in that same run (always reports
+            # success), and a fixture teardown finalizer visibly ran to
+            # completion for one of those two, proving the process was
+            # never actually terminated at all, not just slow to register.
+            # Confirm whether the process is actually a member of the job
+            # at the moment of the kill call, to find out what's really
+            # happening. Remove once understood.
+            with contextlib.suppress(Exception):
+                # A separate, short-lived handle with query rights -- the
+                # retained self._proc_handle deliberately only has
+                # SET_QUOTA|TERMINATE (least privilege for the real
+                # product path), which IsProcessInJob itself can't use.
+                query_handle = win32api.OpenProcess(
+                    win32con.PROCESS_QUERY_INFORMATION, False, self._pid
+                )
+                try:
+                    in_job = win32job.IsProcessInJob(query_handle, self.handle)
+                finally:
+                    win32api.CloseHandle(query_handle)
+                pids_in_job = win32job.QueryInformationJobObject(
+                    self.handle, win32job.JobObjectBasicProcessIdList
+                )
+                warnings.warn(
+                    f"warden: TEMP DIAGNOSTIC -- pid {self._pid}: IsProcessInJob="
+                    f"{in_job}, job's own pid list={pids_in_job}",
+                    stacklevel=2,
+                )
             try:
                 win32job.TerminateJobObject(self.handle, 1)
             except Exception as exc:
@@ -93,6 +118,14 @@ if IS_WINDOWS:
                     warnings.warn(
                         f"warden: TEMP DIAGNOSTIC -- TerminateProcess failed: {exc!r}",
                         stacklevel=2,
+                    )
+            if self._pid is not None:
+                with contextlib.suppress(Exception):
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self._pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
                     )
 
         def close(self):

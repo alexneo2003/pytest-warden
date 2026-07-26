@@ -24,7 +24,9 @@ def windows_jobobject_module(monkeypatch):
     fake_win32job.SetInformationJobObject = MagicMock()
     fake_win32job.AssignProcessToJobObject = MagicMock()
     fake_win32job.TerminateJobObject = MagicMock()
+    fake_win32job.IsProcessInJob = MagicMock(return_value=True)
     fake_win32job.JobObjectExtendedLimitInformation = "JobObjectExtendedLimitInformation"
+    fake_win32job.JobObjectBasicProcessIdList = "JobObjectBasicProcessIdList"
     fake_win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 
     fake_win32api = types.ModuleType("win32api")
@@ -34,6 +36,7 @@ def windows_jobobject_module(monkeypatch):
     fake_win32con = types.ModuleType("win32con")
     fake_win32con.PROCESS_SET_QUOTA = 0x0100
     fake_win32con.PROCESS_TERMINATE = 0x0001
+    fake_win32con.PROCESS_QUERY_INFORMATION = 0x0400
 
     fake_win32process = types.ModuleType("win32process")
     fake_win32process.TerminateProcess = MagicMock()
@@ -85,8 +88,11 @@ def test_windows_job_object_assign_then_terminate_calls_expected_win32_apis_in_o
     job.close()
     # Both the retained process handle and the job handle are closed now
     # (the process handle used to be leaked -- opened in assign() and never
-    # retained or closed at all).
+    # retained or closed at all). The extra "proc-handle" close in the
+    # middle is the TEMPORARY diagnostic query handle opened/closed inside
+    # terminate() -- remove this once the diagnostic is removed.
     assert fake_win32api.CloseHandle.call_args_list == [
+        (("proc-handle",), {}),
         (("proc-handle",), {}),
         (("job-handle",), {}),
     ]
