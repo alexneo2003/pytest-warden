@@ -313,9 +313,18 @@ def _run_static_lpt(session, tmpdir, node_ids, numprocesses, timeout, history_st
 
 
 def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history_store):
-    chunk_size = session.config.getoption("warden_chunk_size") or _default_chunk_size(
-        len(node_ids), numprocesses
-    )
+    chunk_size = session.config.getoption("warden_chunk_size")
+    if chunk_size is None:
+        chunk_size = _default_chunk_size(len(node_ids), numprocesses)
+    elif chunk_size <= 0:
+        # A falsy-coalescing `getoption(...) or default()` would silently
+        # replace an explicit 0 with the default, and a negative value
+        # makes range()'s step negative, so _chunk_queue silently returns an
+        # empty queue -- the whole run then "succeeds" having run nothing at
+        # all. Both are worse than a loud, immediate error.
+        raise pytest.UsageError(
+            f"--warden-chunk-size must be a positive integer, got {chunk_size}"
+        )
     # Each queue entry is (batch, is_retry) -- is_retry MUST travel with the
     # batch through the queue, not just live on the _Worker that ran it, or
     # a chunk that keeps crashing would get re-inserted as a fresh (untagged)
