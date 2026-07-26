@@ -18,6 +18,7 @@ ctrlrunner's multiprocessing.Process worker model.
 
 import contextlib
 import sys
+import warnings
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -67,11 +68,32 @@ if IS_WINDOWS:
             (observed in practice on GitHub Actions' windows-latest
             runners) without raising a Python-visible error, silently
             leaving the process alive."""
-            with contextlib.suppress(Exception):
+            # TEMPORARY diagnostic: real Windows CI shows every single kill
+            # in the suite needing all 3 verify/retry attempts in
+            # _terminate_and_verify, with two specific tests
+            # (single-worker, no children, pure time.sleep(30)) still never
+            # actually dying within the full 30s sleep -- yet other, more
+            # complex hard-kill tests (multi-worker, child-spawning) in the
+            # same run recover and pass. That split isn't explained by the
+            # "swallowed by an ambient job's breakaway policy" theory alone
+            # -- surface the actual Win32 error/exception instead of
+            # silently suppressing it, to find out what's really happening
+            # in this specific shape of failure. Remove once understood.
+            try:
                 win32job.TerminateJobObject(self.handle, 1)
+            except Exception as exc:
+                warnings.warn(
+                    f"warden: TEMP DIAGNOSTIC -- TerminateJobObject failed: {exc!r}",
+                    stacklevel=2,
+                )
             if self._proc_handle is not None:
-                with contextlib.suppress(Exception):
+                try:
                     win32process.TerminateProcess(self._proc_handle, 1)
+                except Exception as exc:
+                    warnings.warn(
+                        f"warden: TEMP DIAGNOSTIC -- TerminateProcess failed: {exc!r}",
+                        stacklevel=2,
+                    )
 
         def close(self):
             if self._proc_handle is not None:
