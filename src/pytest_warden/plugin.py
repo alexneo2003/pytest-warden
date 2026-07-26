@@ -388,6 +388,19 @@ def _run_controller(session):
     if not node_ids:
         return
 
+    # A controller is never itself a worker for ITS OWN invocation -- but
+    # if this process happens to be running AS a worker of some OUTER,
+    # unrelated warden invocation (e.g. a test suite that dogfoods itself
+    # via `pytester.runpytest("--warden", ...)` from inside a warden
+    # worker), PYTEST_WARDEN_WORKER=1 would already be set in its ambient
+    # environment, inherited from that outer context. Left alone, a
+    # conftest.py hookimpl using the documented self-guard pattern would
+    # incorrectly suppress THIS controller's own replay too. _spawn_worker
+    # always re-sets it explicitly to "1" for each of ITS OWN workers, so
+    # clearing it here only affects how this process's OWN in-process
+    # hook calls (the replay) see it -- it does not affect real workers.
+    os.environ.pop("PYTEST_WARDEN_WORKER", None)
+
     numprocesses = _resolve_numprocesses(session.config.getoption("warden_numprocesses"))
     timeout = session.config.getoption("warden_timeout")
     if timeout is not None and timeout <= 0:

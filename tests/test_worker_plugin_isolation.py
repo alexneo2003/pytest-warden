@@ -93,7 +93,7 @@ def test_warden_disable_worker_plugin_does_not_affect_a_bare_conftest_hookimpl(p
     )
 
 
-def test_pytest_warden_worker_env_var_is_set_for_workers_and_absent_bare(pytester):
+def test_pytest_warden_worker_env_var_is_set_for_workers_and_absent_bare(pytester, monkeypatch):
     pytester.makepyfile(
         """
         import os
@@ -108,6 +108,14 @@ def test_pytest_warden_worker_env_var_is_set_for_workers_and_absent_bare(pyteste
     assert (pytester.path / "env_value.txt").read_text() == "'1'"
 
     (pytester.path / "env_value.txt").unlink()
+    # A bare (non-`--warden`) run is fully inert -- it has no reason to
+    # touch PYTEST_WARDEN_WORKER at all, so this check is only meaningful
+    # against a clean ambient environment. Without this, running this
+    # whole suite nested inside an outer `--warden` invocation (this
+    # project's own self-hosted dogfood run) would inherit the OUTER
+    # invocation's PYTEST_WARDEN_WORKER=1 and produce a false failure here
+    # -- unrelated to whether THIS bare sub-run is itself inert.
+    monkeypatch.delenv("PYTEST_WARDEN_WORKER", raising=False)
     bare_result = pytester.runpytest()
     bare_result.assert_outcomes(passed=1)
     assert (pytester.path / "env_value.txt").read_text() == "None"
