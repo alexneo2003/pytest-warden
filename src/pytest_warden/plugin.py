@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from dataclasses import dataclass
 
 import pytest
@@ -512,6 +513,27 @@ def _combine_coverage(session, workers):
     session.config._warden_cov_data_file = combined_path
 
 
+def _replay_line(session, worker, line):
+    # The progress file is written exclusively by warden's own worker.py,
+    # so a line that's syntactically complete (newline-terminated, past
+    # _read_new_lines' torn-read filter) but still fails to parse indicates
+    # real corruption, not a race -- rare, but must degrade gracefully
+    # rather than taking down the whole controller loop over one bad
+    # event. If the corruption cost us the real outcome for the worker's
+    # in-flight test, the existing "worker exited unexpectedly" fallback in
+    # _poll_once still produces a visible report once the worker exits, so
+    # skipping here doesn't risk a silent, permanent loss.
+    try:
+        event = json.loads(line)
+        _replay_event(session, worker, event)
+    except (json.JSONDecodeError, KeyError) as exc:
+        warnings.warn(
+            f"warden: ignoring unparseable progress-channel line from worker "
+            f"(progress file {worker.progress_path!r}): {exc!r}",
+            stacklevel=2,
+        )
+
+
 def _poll_once(session, workers):
     now = time.monotonic()
     still_pending = []
@@ -521,11 +543,11 @@ def _poll_once(session, workers):
             if worker.timeout:
                 worker.deadline = now + worker.timeout
             for line in new_lines:
-                _replay_event(session, worker, json.loads(line))
+                _replay_line(session, worker, line)
 
         if worker.proc.poll() is not None:
             for line in _read_new_lines(worker):
-                _replay_event(session, worker, json.loads(line))
+                _replay_line(session, worker, line)
             if worker.current is not None:
                 code = worker.proc.returncode
                 _report_incident(
