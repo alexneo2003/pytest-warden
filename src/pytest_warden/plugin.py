@@ -55,7 +55,9 @@ def pytest_addoption(parser):
         action="store",
         type=float,
         default=None,
-        help="Per-test timeout in seconds; a test exceeding it hard-kills its whole worker subprocess.",
+        help="Default per-test timeout in seconds, for any test without its own "
+        "@pytest.mark.timeout(seconds); a test exceeding its timeout hard-kills "
+        "its whole worker subprocess.",
     )
     group.addoption(
         "--warden-history-db",
@@ -122,6 +124,15 @@ class _HistoryCollector:
 
 
 def pytest_configure(config):
+    # Registered unconditionally (not just under --warden) so the mark is
+    # recognized -- and PytestUnknownMarkWarning stays quiet -- in a bare
+    # run too; it's simply inert there, same as --timeout itself.
+    config.addinivalue_line(
+        "markers",
+        "timeout(seconds): under --warden, hard-kill this test's whole worker "
+        "subprocess if it runs longer than `seconds`, overriding --timeout for "
+        "this test only. Has no effect without --warden.",
+    )
     if config.getoption("warden"):
         collector = _HistoryCollector()
         config.pluginmanager.register(collector, "warden-history-collector")
@@ -192,6 +203,20 @@ def _lpt_batch(node_ids, numprocesses, history_store, previously_failed=frozense
         batches[i].append(node_id)
         loads[i] += weights[node_id]
     return [batch for batch in batches if batch]
+
+
+def _marker_timeout_seconds(item):
+    marker = item.get_closest_marker("timeout")
+    if marker is None:
+        return None
+    if not marker.args:
+        raise pytest.UsageError(f"{item.nodeid}: @pytest.mark.timeout(...) requires a seconds argument")
+    value = float(marker.args[0])
+    if value <= 0:
+        raise pytest.UsageError(
+            f"{item.nodeid}: @pytest.mark.timeout seconds must be positive, got {value}"
+        )
+    return value
 
 
 def _available_cpu_count():
@@ -358,10 +383,19 @@ def _spawn_worker(session, batch, progress_path, cov_data_file, run_dir):
 
 class _Worker:
     def __init__(
-        self, proc, job, progress_path, timeout, batch, cov_data_file=None, is_retry=False
+        self,
+        proc,
+        job,
+        worker_index,
+        progress_path,
+        timeout,
+        batch,
+        cov_data_file=None,
+        is_retry=False,
     ):
         self.proc = proc
         self.job = job
+        self.worker_index = worker_index
         self.progress_path = progress_path
         self.timeout = timeout
         self.batch = batch
@@ -369,6 +403,12 @@ class _Worker:
         self.is_retry = is_retry
         self.byte_offset = 0
         self.deadline = time.monotonic() + timeout if timeout else None
+        # Budget for whichever test is currently in-flight (self.current) --
+        # kept in lockstep with it by _replay_event's logstart branch, which
+        # looks up that test's own @pytest.mark.timeout override (falling
+        # back to this worker's `timeout` default). Starts equal to `timeout`
+        # itself purely to cover the window before the first logstart event.
+        self.current_timeout = timeout
         self.killed = False
         self.started_ids = set()
         self.current = None  # {"nodeid":..., "location":...} of the in-flight test
@@ -382,6 +422,34 @@ def _terminate_all(workers):
     for worker in workers:
         with contextlib.suppress(Exception):
             worker.proc.wait(timeout=5)
+
+
+def _warden_write_line(session, message):
+    # getattr-safe throughout: test_progress_channel.py drives _replay_event
+    # (which uses this for the -v progress line) against a bare
+    # types.SimpleNamespace(hook=hook) stand-in for session.config, with no
+    # real `pluginmanager` -- this must degrade to a no-op there rather than
+    # raise, since that rig is only testing controller parsing robustness,
+    # not terminal output.
+    pluginmanager = getattr(session.config, "pluginmanager", None)
+    if pluginmanager is None:
+        return
+    reporter = pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        # reporter.write_line() calls TerminalReporter.ensure_newline(),
+        # but that only emits a newline when self.currentfspath is set --
+        # and warden always disables fspath grouping (showfspath = False,
+        # set in _run_controller), so it's permanently None and
+        # ensure_newline() is a permanent no-op here. Without checking the
+        # writer's own line-position tracking instead, any raw,
+        # not-yet-newline-terminated pytest output already on the current
+        # line (a bare dot/letter under default or -q verbosity, always
+        # possible from _report_incident/_report_never_ran, which don't go
+        # through _replay_event's dot-suppression) would visually smash
+        # into this message, e.g. "FFwarden: worker 0 didn't finish...".
+        if reporter._tw.width_of_current_line:
+            reporter._tw.line()
+        reporter.write_line(message)
 
 
 def _run_controller(session):
@@ -402,6 +470,20 @@ def _run_controller(session):
     # hook calls (the replay) see it -- it does not affect real workers.
     os.environ.pop("PYTEST_WARDEN_WORKER", None)
 
+    # Same fix xdist itself applies (xdist/plugin.py's own pytest_configure):
+    # non-verbose TerminalReporter.pytest_runtest_logstart prints a bare
+    # "path/to/file.py " line (no letter yet) any time the replayed nodeid's
+    # file differs from the last one shown -- harmless for a single serial
+    # worker, but with several concurrently-replayed workers interleaving
+    # different files' events, nearly every single test trips this, turning
+    # what should be a plain dot stream into "orphaned path, no dot" lines
+    # scattered throughout the run. Suppressing it here only silences that
+    # bare path line; the dot/letter itself (written unconditionally by
+    # pytest_runtest_logreport, regardless of this flag) still prints.
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.showfspath = False
+
     numprocesses = _resolve_numprocesses(session.config.getoption("warden_numprocesses"))
     timeout = session.config.getoption("warden_timeout")
     if timeout is not None and timeout <= 0:
@@ -411,6 +493,28 @@ def _run_controller(session):
         # --timeout=0 almost certainly means.
         raise pytest.UsageError(f"--timeout must be a positive number, got {timeout}")
     work_stealing = session.config.getoption("warden_work_stealing")
+
+    # Per-test override: a test marked @pytest.mark.timeout(N) gets N as its
+    # own deadline budget instead of the --timeout default -- looked up by
+    # _replay_event on each logstart so _poll_once measures the CURRENTLY
+    # in-flight test's own budget, not a single constant for the whole worker.
+    session.config._warden_test_timeouts = {
+        item.nodeid: timeout if (marker_seconds := _marker_timeout_seconds(item)) is None else marker_seconds
+        for item in session.items
+    }
+
+    # Only without -v: with -v, pytest's own per-test reporting already
+    # gets a `worker N -> nodeid` line per test (see _replay_event's
+    # logstart branch), so the worker count is already implicitly visible
+    # there; without -v nothing else says how many workers are in play.
+    if not session.config.option.verbose:
+        scheduling = "work-stealing" if work_stealing else "static LPT"
+        _warden_write_line(
+            session, f"warden: starting run with {numprocesses} worker(s) ({scheduling} scheduling)"
+        )
+
+    session.config._warden_total_tests = len(node_ids)
+    session.config._warden_progress_count = 0
 
     _ACTIVE_WORKERS.clear()
     history_store = HistoryStore(_history_db_path(session))
@@ -451,10 +555,18 @@ def _run_static_lpt(session, tmpdir, node_ids, numprocesses, timeout, history_st
     workers, worker_count = _run_wave(session, tmpdir, worker_count, batches, timeout)
     all_workers.extend(workers)
 
-    retry_batches = [
-        [nid for nid in worker.batch if nid not in worker.started_ids] for worker in workers
+    unfinished = [
+        (worker, [nid for nid in worker.batch if nid not in worker.started_ids])
+        for worker in workers
     ]
-    retry_batches = [b for b in retry_batches if b]
+    unfinished = [(worker, ids) for worker, ids in unfinished if ids]
+    for worker, ids in unfinished:
+        _warden_write_line(
+            session,
+            f"warden: worker {worker.worker_index} didn't finish its batch "
+            f"({len(ids)} test(s) left) -- recreating a fresh worker to pick them up",
+        )
+    retry_batches = [ids for _, ids in unfinished]
 
     if retry_batches and not session.shouldfail:
         retry_workers, worker_count = _run_wave(
@@ -468,6 +580,7 @@ def _run_static_lpt(session, tmpdir, node_ids, numprocesses, timeout, history_st
                     session,
                     nid,
                     "warden: worker never reached this test even after one retry",
+                    worker.worker_index,
                 )
 
     return worker_count, all_workers
@@ -525,6 +638,11 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
             worker.job.close()
             remainder = [nid for nid in worker.batch if nid not in worker.started_ids]
             if remainder and not worker.is_retry and not session.shouldfail:
+                _warden_write_line(
+                    session,
+                    f"warden: worker {worker.worker_index} didn't finish its batch "
+                    f"({len(remainder)} test(s) left) -- recreating a fresh worker to pick them up",
+                )
                 queue.insert(0, (remainder, True))
             elif remainder:
                 for nid in remainder:
@@ -532,6 +650,7 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
                         session,
                         nid,
                         "warden: worker never reached this test even after one retry",
+                        worker.worker_index,
                     )
 
         active = still_running
@@ -564,6 +683,7 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
                             session,
                             nid,
                             "warden: worker never reached this test even after one retry",
+                            worker.worker_index,
                         )
                 active = still_running
 
@@ -598,14 +718,17 @@ def _run_wave(session, tmpdir, worker_count_start, batches, timeout):
     workers = []
     cov_sources = _cov_sources(session)
     for batch in batches:
-        progress_path = os.path.join(tmpdir, f"worker-{worker_count}.jsonl")
+        worker_index = worker_count
+        progress_path = os.path.join(tmpdir, f"worker-{worker_index}.jsonl")
         cov_data_file = (
-            os.path.join(tmpdir, f".coverage.worker-{worker_count}") if cov_sources else None
+            os.path.join(tmpdir, f".coverage.worker-{worker_index}") if cov_sources else None
         )
         worker_count += 1
         open(progress_path, "a", encoding="utf-8").close()
         proc, job = _spawn_worker(session, batch, progress_path, cov_data_file, tmpdir)
-        workers.append(_Worker(proc, job, progress_path, timeout, batch, cov_data_file))
+        workers.append(
+            _Worker(proc, job, worker_index, progress_path, timeout, batch, cov_data_file)
+        )
 
     _supervise(session, workers)
 
@@ -623,7 +746,9 @@ def _spawn_chunk_worker(session, tmpdir, worker_count, batch, timeout, is_retry=
     )
     open(progress_path, "a", encoding="utf-8").close()
     proc, job = _spawn_worker(session, batch, progress_path, cov_data_file, tmpdir)
-    worker = _Worker(proc, job, progress_path, timeout, batch, cov_data_file, is_retry)
+    worker = _Worker(
+        proc, job, worker_count, progress_path, timeout, batch, cov_data_file, is_retry
+    )
     return worker_count + 1, worker
 
 
@@ -721,10 +846,17 @@ def _poll_once(session, workers):
         if not worker.killed:
             new_lines = _read_new_lines(worker)
             if new_lines:
-                if worker.timeout:
-                    worker.deadline = now + worker.timeout
                 for line in new_lines:
                     _replay_line(session, worker, line)
+                # Replayed above, so worker.current/current_timeout now
+                # reflect whichever test is in-flight as of the LAST line
+                # just replayed -- the deadline must be measured against
+                # THAT test's own budget (its @pytest.mark.timeout override,
+                # or the --timeout default), not a stale one left over from
+                # whatever was running before these lines arrived.
+                effective_timeout = worker.current_timeout if worker.current is not None else worker.timeout
+                if effective_timeout:
+                    worker.deadline = now + effective_timeout
 
         if worker.proc.poll() is not None:
             if not worker.killed:
@@ -745,7 +877,7 @@ def _poll_once(session, workers):
             _report_incident(
                 session,
                 worker,
-                f"warden: hard-killed after exceeding {worker.timeout}s timeout",
+                f"warden: hard-killed after exceeding {worker.current_timeout}s timeout",
             )
 
         still_pending.append(worker)
@@ -819,6 +951,51 @@ def _read_new_lines(worker):
     return complete
 
 
+@contextlib.contextmanager
+def _suppressed_dot_write(config):
+    """While active, pytest's own raw per-test dot/letter -- written
+    directly to the terminal by TerminalReporter.pytest_runtest_logreport,
+    with no trailing newline, whenever verbosity is 0 -- is swallowed.
+    Warden always prints its own richer `[done/total] worker N -> nodeid
+    WORD` line instead (see _print_progress_line below); without this, that
+    raw letter visually smashes into whatever text prints right after it
+    (e.g. "FFFFwarden: worker 0 didn't finish its batch...").
+    """
+    verbose = getattr(getattr(config, "option", None), "verbose", 0)
+    reporter = getattr(config, "pluginmanager", None)
+    if reporter is not None:
+        reporter = reporter.get_plugin("terminalreporter")
+    if verbose or reporter is None:
+        yield
+        return
+    tw = reporter._tw
+    original_write = tw.write
+    tw.write = lambda *args, **kwargs: None
+    try:
+        yield
+    finally:
+        tw.write = original_write
+
+
+def _print_progress_line(session, config, worker_index, nodeid, word):
+    # Shown by default, but suppressed under -v: with -v, pytest's own
+    # terminal reporter already prints this exact nodeid (plus its own
+    # outcome word) on its own line -- adding ours on top would just be the
+    # same information twice. getattr-safe since test_progress_channel.py
+    # drives this against a bare stand-in `config` with no `.option` at all.
+    verbose = getattr(getattr(config, "option", None), "verbose", 0)
+    if verbose:
+        return
+    total = getattr(config, "_warden_total_tests", None)
+    if total is None:
+        return
+    config._warden_progress_count = getattr(config, "_warden_progress_count", 0) + 1
+    _warden_write_line(
+        session,
+        f"[{config._warden_progress_count}/{total}] worker {worker_index} -> {nodeid} {word}",
+    )
+
+
 def _replay_event(session, worker, event):
     hook = session.config.hook
     config = session.config
@@ -826,9 +1003,31 @@ def _replay_event(session, worker, event):
     if kind == "logstart":
         worker.started_ids.add(event["nodeid"])
         worker.current = {"nodeid": event["nodeid"], "location": event["location"]}
+        # getattr-safe: test_progress_channel.py drives this against a bare
+        # stand-in config with no _warden_test_timeouts at all (real
+        # controller runs always set it in _run_controller before any
+        # worker is spawned).
+        test_timeouts = getattr(config, "_warden_test_timeouts", None) or {}
+        worker.current_timeout = test_timeouts.get(event["nodeid"], worker.timeout)
         hook.pytest_runtest_logstart(nodeid=event["nodeid"], location=tuple(event["location"]))
     elif kind == "logreport":
         report = hook.pytest_report_from_serializable(config=config, data=event["data"])
+        # A raw skip/xfail longrepr (no traceback -- just a bare
+        # (path, lineno, reason) tuple, per _pytest.reports._to_json) is
+        # left untouched at serialize time on the assumption that whatever
+        # deserializes it preserves Python types. execnet (pytest-xdist's
+        # channel) does; plain `json.dumps`/`json.loads` (worker.py's
+        # progress channel) doesn't -- JSON has no tuple type, so it comes
+        # back as a list. That silently fails pytest's own
+        # `assert isinstance(report.longrepr, tuple)` in verbose-mode
+        # skip-reason reporting (_pytest/terminal.py's
+        # _get_raw_skip_reason) with an INTERNALERROR that aborts the
+        # whole run. A list here is unambiguously a round-tripped tuple --
+        # every other longrepr shape (None, a plain string, or a real
+        # ExceptionChainRepr/ReprExceptionInfo) survives the round-trip as
+        # its original type, never as a bare list.
+        if isinstance(report.longrepr, list):
+            report.longrepr = tuple(report.longrepr)
         # Captured before quarantine may rewrite report.outcome (failed ->
         # skipped/xfail) -- history must record what actually happened, not
         # what the report was rewritten to show, or a persistently-flaky
@@ -836,9 +1035,41 @@ def _replay_event(session, worker, event):
         # by "skipped" ones over time until _is_flaky no longer sees them.
         report._warden_original_outcome = report.outcome
         report = _maybe_quarantine(session, report)
-        hook.pytest_runtest_logreport(report=report)
+
+        # TerminalReporter.pytest_runtest_logreport would otherwise write a
+        # bare dot/letter (and occasionally the "[ X%]" progress marker) for
+        # this same report -- pure duplication of our own [done/total] ...
+        # RESULT line at logfinish below, which already conveys the same
+        # outcome with an exact count instead of a rounded percentage.
+        # `_add_stats` -- what the final short summary/FAILURES section
+        # actually needs -- runs earlier in the same method, unguarded by
+        # this write, so it's unaffected.
+        with _suppressed_dot_write(config):
+            hook.pytest_runtest_logreport(report=report)
+        # Captures the human-readable word (PASSED/FAILED/SKIPPED/XFAIL/...)
+        # for the progress line printed at logfinish below, once the
+        # outcome is actually known -- reuses pytest's own status hook
+        # rather than reinventing outcome -> word (report.outcome alone is
+        # just "passed"/"failed"/"skipped", missing the xfail/xpass
+        # distinction pytest_report_teststatus already knows how to make).
+        # Passing setup/teardown phases report an empty word ("", "", "")
+        # and must not blank out an already-known "PASSED" from the call
+        # phase, so only a truthy word overwrites.
+        if worker.current is not None:
+            _category, _letter, word = hook.pytest_report_teststatus(report=report, config=config)
+            if isinstance(word, tuple):
+                word = word[0]
+            if word:
+                worker.current["outcome_word"] = word
     elif kind == "logfinish":
+        current = worker.current
         worker.current = None
+        # Without -v, pytest shows nothing test-identifying at all (just a
+        # dot/letter, itself suppressed above) -- this is the only place
+        # the test, its worker, and its outcome show up together.
+        if current is not None:
+            word = current.get("outcome_word", "?")
+            _print_progress_line(session, config, worker.worker_index, event["nodeid"], word)
         hook.pytest_runtest_logfinish(nodeid=event["nodeid"], location=tuple(event["location"]))
 
 
@@ -846,7 +1077,8 @@ def _report_incident(session, worker, message):
     current = worker.current
     if current is None:
         return
-    hook = session.config.hook
+    config = session.config
+    hook = config.hook
     location = tuple(current["location"])
     report = TestReport(
         nodeid=current["nodeid"],
@@ -856,16 +1088,19 @@ def _report_incident(session, worker, message):
         longrepr=message,
         when="call",
         sections=[],
-        duration=worker.timeout or 0,
+        duration=worker.current_timeout or 0,
         user_properties=[],
     )
-    hook.pytest_runtest_logreport(report=report)
+    with _suppressed_dot_write(config):
+        hook.pytest_runtest_logreport(report=report)
+    _print_progress_line(session, config, worker.worker_index, current["nodeid"], "FAILED")
     hook.pytest_runtest_logfinish(nodeid=current["nodeid"], location=location)
     worker.current = None
 
 
-def _report_never_ran(session, nodeid, message):
-    hook = session.config.hook
+def _report_never_ran(session, nodeid, message, worker_index=None):
+    config = session.config
+    hook = config.hook
     fspath = nodeid.split("::", 1)[0]
     location = (fspath, None, nodeid)
     hook.pytest_runtest_logstart(nodeid=nodeid, location=location)
@@ -880,11 +1115,16 @@ def _report_never_ran(session, nodeid, message):
         duration=0,
         user_properties=[],
     )
-    hook.pytest_runtest_logreport(report=report)
+    with _suppressed_dot_write(config):
+        hook.pytest_runtest_logreport(report=report)
+    if worker_index is not None:
+        _print_progress_line(session, config, worker_index, nodeid, "FAILED")
     hook.pytest_runtest_logfinish(nodeid=nodeid, location=location)
 
 
 def pytest_terminal_summary(terminalreporter, config):
+    if config.option.verbose:
+        return
     count = getattr(config, "_warden_worker_count", None)
     if count is not None:
         terminalreporter.write_line(f"warden: distributed across {count} worker(s)")

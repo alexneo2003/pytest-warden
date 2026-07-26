@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import time
 import types
 
@@ -10,7 +11,7 @@ from pytest_warden.plugin import _read_new_lines
 
 def test_terminate_kills_a_running_process():
     proc = subprocess.Popen(
-        ["python3", "-c", "import time; time.sleep(30)"],
+        [sys.executable, "-c", "import time; time.sleep(30)"],
         start_new_session=True,
     )
     job = JobObject()
@@ -39,7 +40,7 @@ def test_terminate_kills_a_child_process_spawned_by_the_worker():
     # already exist before we could call job.assign().
     proc = subprocess.Popen(
         [
-            "python3",
+            sys.executable,
             "-c",
             "import subprocess, sys, time\n"
             "sys.stdin.readline()\n"  # wait for the parent's go-ahead

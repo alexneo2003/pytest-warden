@@ -73,6 +73,7 @@ def rig(tmp_path):
     worker = _Worker(
         proc=proc,
         job=_FakeJob(),
+        worker_index=0,
         progress_path=str(progress_path),
         timeout=None,
         batch=["test_a", "test_b"],

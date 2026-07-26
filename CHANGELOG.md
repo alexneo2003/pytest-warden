@@ -31,6 +31,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warden is active.
 - `--warden-run-dir` (internal): the controller's per-invocation shared
   temp directory, forwarded to every worker subprocess.
+- Live terminal reporting: a run previously stayed completely silent until
+  the final summary line, giving no sign of how many workers were in play
+  or what they were doing. `--warden` now prints a one-line startup banner
+  (worker count and scheduling mode) before dispatch begins, shown by
+  default and suppressed under `-v`/`-vv` (see below); a
+  `[done/total] worker N -> nodeid RESULT` line as each test finishes
+  (`RESULT` being pytest's own PASSED/FAILED/SKIPPED/XFAIL/... word, via
+  the same `pytest_report_teststatus` hook the builtin terminal reporter
+  itself uses), likewise shown by default (this is the only place a bare,
+  non-`-v` run learns which test ran on which worker and how it came out)
+  and suppressed under `-v`/`-vv` (pytest's own verbose reporter already
+  prints that same nodeid plus outcome on its own line, so ours would
+  just repeat it) and under `-q`/`-qq`; and an
+  always-on `warden: worker N didn't finish its batch (K test(s) left) --
+  recreating a fresh worker to pick them up` line wherever a worker crash
+  or hard-kill silently requeued the rest of its batch, previously visible
+  only as an unexplained gap before the retry's own results appeared. The
+  final `warden: distributed across N worker(s)` summary line is likewise
+  now suppressed under `-v`/`-vv` -- with `-v`, per-test worker attribution
+  is already visible throughout the run, so restating the worker count
+  again at the end is redundant. Also (the same fix `pytest-xdist` itself
+  applies in `xdist/plugin.py`'s `pytest_configure`): non-verbose runs no
+  longer show pytest's own bare `path/to/file.py ` line with the concurrent
+  replay across several workers constantly switching files -- disables
+  `TerminalReporter.showfspath`, same as xdist, so a plain dot stream shows
+  instead of that line getting orphaned (no letter ever lands on it before
+  the next file switches it away) once or twice per test. In non-verbose
+  mode, the dot/letter itself (and the occasional "[ X%]" marker) is now
+  also suppressed for the same reason our own `[done/total] ... RESULT`
+  line already exists -- pytest core has no public flag for "run
+  `pytest_runtest_logreport` but skip just its own write" (verbosity is
+  the only knob it exposes, and it's all-or-nothing across far more than
+  this one write), so `_replay_event` temporarily swallows
+  `TerminalReporter`'s own `_tw.write` for the duration of that single
+  replayed call, restoring it immediately after. `_add_stats` -- what the
+  final short summary/FAILURES section actually depends on -- runs
+  earlier in the same method, unguarded by this write, so it's unaffected.
 
 ### Changed
 
@@ -45,6 +82,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `@pytest.mark.timeout(N)` was documented (0.1.0's own changelog entry)
+  as a per-test override of `--timeout`, but no code ever read the marker
+  -- pytest correctly flagged it as unrecognized
+  (`PytestUnknownMarkWarning: Unknown pytest.mark.timeout`), and every
+  test in a `--warden` run silently shared the single global `--timeout`
+  value regardless of any `timeout` mark on it. The marker is now
+  registered (so it's recognized with or without `--warden`) and actually
+  read per test, overriding `--timeout` for that test only; a hard-kill's
+  reported timeout (in both its message and the synthetic report's
+  duration) now reflects the specific budget that was in force for the
+  test that got killed, not the worker's global default.
+- A hard-killed test (or one reported via "worker never reached this
+  test") printed pytest's own raw, unsuppressed dot/letter (no trailing
+  newline) because `_report_incident`/`_report_never_ran` called
+  `hook.pytest_runtest_logreport()` directly instead of going through the
+  same terminal-write suppression `_replay_event` already applies to
+  normal completions. Without `-v` this visually smashed into whatever
+  warden text printed right after it (e.g. `FFFFwarden: worker 0 didn't
+  finish its batch...`), and these tests never got the numbered `[done/
+  total] worker N -> nodeid WORD` progress line every other test gets.
+  Both paths now share the same suppression and progress-line logic, so
+  every test -- however it ends -- reports the same way.
+- The smash above could still happen under `-q`/`-qq` even after the fix
+  directly above: that verbosity level intentionally still shows a raw
+  dot/letter (matching vanilla `pytest -q`'s own plain-dots look), so
+  suppressing it isn't an option there. `_warden_write_line` now checks
+  the terminal writer's own `width_of_current_line` and emits a newline
+  first whenever anything is already sitting on the current line,
+  regardless of which verbosity level or code path put it there --
+  `TerminalReporter.ensure_newline()` doesn't help here since it only
+  acts when `currentfspath` is set, and warden permanently disables that
+  (`showfspath = False`) to avoid a different, unrelated multi-worker
+  interleaving artifact.
+- `pytest --warden -v` could crash the whole run with an `INTERNALERROR`
+  the moment any test was skipped via `@pytest.mark.skipif`/`pytest.skip()`
+  (no `wasxfail`, so a bare `(path, lineno, reason)` longrepr rather than a
+  full traceback object). `worker.py`'s progress channel round-trips every
+  report through plain `json.dumps`/`json.loads`, which has no tuple type
+  -- unlike `pytest-xdist`'s `execnet` channel, which `_pytest.reports`'
+  serializable-report format was designed against and which does preserve
+  tuples, `_report_kwargs_from_json` leaves a raw (non-traceback) longrepr
+  untouched on the assumption the round-trip preserves its type, so it came
+  back on the controller side as a list instead of the original tuple.
+  That silently failed pytest's own `assert isinstance(report.longrepr,
+  tuple)` in verbose-mode skip-reason reporting
+  (`_pytest/terminal.py::_get_raw_skip_reason`), aborting the entire run.
+  `_replay_event` now converts a replayed report's `longrepr` back to a
+  tuple whenever it comes back as a list -- every other longrepr shape
+  (`None`, a plain string, or a real exception-repr object) already
+  survives the round-trip as its original type, so a list is unambiguously
+  a tuple that lost its type over JSON.
+- `test_terminate_kills_a_child_process_spawned_by_the_worker` and
+  `test_hard_kill_reaches_a_grandchild_process` spawned their synthetic
+  child/grandchild via the bareword `"python3"` instead of `sys.executable`.
+  On a machine where `python3` resolves (ahead of the real interpreter) to
+  a Windows App Execution Alias stub -- e.g. `PythonSoftwareFoundation.
+  PythonManager`'s `WindowsApps\python3.exe` -- that stub hands off to a
+  separate, reparented real interpreter process that is never a descendant
+  of the PID `Popen` returns, so it (and anything it spawns) never joins
+  the Job Object `job.assign()`/`job.terminate()` were targeting, and the
+  test's own hard-kill assertion failed as a result. `_spawn_worker`
+  already used `sys.executable` for real workers, so production was never
+  affected -- both tests now do the same.
 - A warden controller running nested inside an outer warden worker (this
   project's own self-hosted dogfood run does this) no longer inherits
   `PYTEST_WARDEN_WORKER=1` from the outer invocation's environment, which
