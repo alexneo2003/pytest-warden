@@ -446,6 +446,12 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
             for worker in active:
                 worker.proc.wait()
                 worker.job.close()
+                # See the matching comment in _supervise: a test in-flight
+                # on a worker terminated because ANOTHER worker tripped
+                # --maxfail must still be reported, not silently dropped.
+                _report_incident(
+                    session, worker, "warden: worker terminated because --maxfail was reached"
+                )
             active = []
 
         if active:
@@ -552,6 +558,15 @@ def _supervise(session, workers):
                 worker.job.terminate()
             for worker in pending:
                 worker.proc.wait()
+                # Unlike the timeout-kill branch in _poll_once, this
+                # termination is triggered by ANOTHER worker's failure
+                # tripping --maxfail, not by this worker's own test hanging
+                # -- without this, a test that was genuinely in-flight here
+                # vanishes from the final report entirely instead of
+                # showing up as failed like every other incident path does.
+                _report_incident(
+                    session, worker, "warden: worker terminated because --maxfail was reached"
+                )
             pending = []
 
         if pending:
