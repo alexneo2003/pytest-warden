@@ -71,6 +71,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `requires-python` raised from `>=3.9` to `>=3.10` (Python 3.9 reached
+  its own upstream end-of-life in October 2025). This wasn't just a
+  formality: `history.py`/`plugin.py` already use bare `str | None`-style
+  union annotations (PEP 604) with no `from __future__ import
+  annotations`, which raises `TypeError: unsupported operand type(s) for
+  |: 'type' and 'NoneType'` at import time on real Python 3.9 -- the
+  package's `>=3.9` claim was already false and the plugin could never
+  actually load there. Confirmed by installing a real 3.9 interpreter and
+  importing `pytest_warden.plugin` directly.
 - `--numprocesses`: now rejects 0/negative/unparseable values with a
   `pytest.UsageError` instead of silently clamping to 1, matching
   `--timeout`/`--warden-chunk-size`'s existing validation convention.
@@ -82,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- GitHub Dependabot flagged `pytest < 9.0.3` (GHSA-6w46-j5rx-g56g /
+  CVE-2025-71176, predictable `/tmp/pytest-of-{user}` naming on UNIX)
+  as a moderate-severity vulnerability in this repo's own `uv.lock`: with
+  `requires-python = ">=3.9"`, uv resolved pytest 8.4.2 (vulnerable, and
+  the last release supporting 3.9 -- pytest never backported the fix to
+  the 8.x line) for that environment marker, alongside 9.1.1 (already
+  fixed) for 3.10+. Raising the floor to `>=3.10` (see "Changed" -- this
+  was independently warranted anyway) leaves only the patched 9.1.1 in
+  the lockfile.
 - `@pytest.mark.timeout(N)` was documented (0.1.0's own changelog entry)
   as a per-test override of `--timeout`, but no code ever read the marker
   -- pytest correctly flagged it as unrecognized

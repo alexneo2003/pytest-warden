@@ -3,7 +3,7 @@ name = "pytest-warden"
 version = "0.1.0"
 description = "Windows Job Object hard-kill supervision for real pytest subprocesses — a drop-in replacement for pytest-xdist + pytest-timeout on hang-prone CI."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "pytest>=7",
     "coverage>=7",
@@ -30,7 +30,7 @@ dev = [
 ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
@@ -46,7 +46,7 @@ known-first-party = ["pytest_warden"]
 quote-style = "double"
 
 [tool.ty.environment]
-python-version = "3.9"
+python-version = "3.10"
 # CI's lint job (the only place `ty check` runs today) is pinned to
 # ubuntu-latest -- without this, `ty check` targets whatever platform it's
 # invoked FROM instead, so the same command passes in CI but fails locally
