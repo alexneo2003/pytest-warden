@@ -118,6 +118,14 @@ never loop a run forever.
 - **Give tests a real `--timeout`.** Without one, a hung test blocks its
   worker indefinitely just like bare pytest would — warden's hard-kill
   guarantee only fires once a timeout is actually configured.
+- **Know that a hard kill loses coverage for the whole batch it was in, not
+  just the killed test.** `coverage.py` only flushes its data to disk at
+  clean process exit; a Job Object kill skips that entirely, so any test
+  that already passed in the same worker can end up looking uncovered too.
+  If you're combining `--cov` with `--timeout` and coverage accuracy
+  matters, prefer more, smaller batches (a higher `--numprocesses`, or
+  `--warden-work-stealing` with a small `--warden-chunk-size`) so a kill
+  only ever costs you one test's worth of coverage data.
 - **Reach for `--warden-work-stealing` only once plain LPT batching
   demonstrably isn't enough.** It helps specifically when tests have no
   history yet, or when a test's duration varies a lot run to run, so a

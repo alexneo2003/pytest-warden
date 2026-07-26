@@ -65,6 +65,77 @@ def test_quarantining_a_failure_still_records_it_as_failed_in_history(pytester):
     )
 
 
+def test_coverage_combine_does_not_crash_when_a_worker_is_hard_killed(pytester):
+    # coverage.py only flushes its data file at clean process exit; a Job
+    # Object hard-kill skips that entirely (equivalent to SIGKILL, no atexit
+    # handlers run), so a killed worker's coverage data file can be missing
+    # or incomplete. _combine_coverage must tolerate that rather than
+    # raising out of an otherwise-successful run.
+    pytester.makepyfile(
+        mod="def add(a, b):\n    return a + b\n",
+    )
+    pytester.makepyfile(
+        test_mod="""
+        import time
+        from mod import add
+
+        def test_a():
+            assert add(1, 2) == 3
+
+        def test_hangs():
+            add(1, 2)
+            time.sleep(30)
+        """
+    )
+    result = pytester.runpytest(
+        "--warden", "--numprocesses=1", "--timeout=1", "--cov=mod"
+    )
+    result.assert_outcomes(passed=1, failed=1)
+    # The point: this must not raise (e.g. coverage.CoverageException) and
+    # abort the whole run just because one worker's data was incomplete.
+    assert (pytester.path / ".coverage").exists()
+
+
+def test_coverage_loss_from_a_hard_kill_is_scoped_to_that_workers_batch(pytester):
+    # Documents a real, known trade-off: killing a worker loses ALL of that
+    # worker's buffered-but-unflushed coverage data, not just the killed
+    # test's -- so a test that already passed can appear uncovered purely
+    # because it shared a batch with one that later got killed. Putting
+    # test_a on ITS OWN worker (numprocesses=2) avoids this; the paired
+    # single-worker case is covered by the crash-safety test above.
+    pytester.makepyfile(
+        mod="def add(a, b):\n    return a + b\n",
+    )
+    pytester.makepyfile(
+        test_mod="""
+        import time
+        from mod import add
+
+        def test_a():
+            assert add(1, 2) == 3
+
+        def test_hangs():
+            add(1, 2)
+            time.sleep(30)
+        """
+    )
+    result = pytester.runpytest(
+        "--warden", "--numprocesses=2", "--timeout=1", "--cov=mod"
+    )
+    result.assert_outcomes(passed=1, failed=1)
+
+    import coverage
+
+    cov = coverage.Coverage(data_file=str(pytester.path / ".coverage"))
+    cov.load()
+    _, statements, _, missing, _ = cov.analysis2(str(pytester.path / "mod.py"))
+    assert statements
+    assert missing == [], (
+        "test_a's own worker should have flushed real coverage for mod.py "
+        f"even though test_hangs' worker was killed, missing: {missing}"
+    )
+
+
 def test_negative_chunk_size_is_rejected_instead_of_silently_running_nothing(pytester):
     pytester.makepyfile(
         """
