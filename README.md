@@ -146,9 +146,37 @@ never loop a run forever.
   is different from CLI-flag-gated plugins (`--junitxml`, the `--lf`/`--ff`
   cache): their flags are never forwarded to workers, so they only ever
   run in the controller and observe each result exactly once. If a
-  reporting plugin's side effects must fire exactly once under warden,
-  gate it behind a CLI flag (so it only activates in the controller)
-  rather than an always-on `conftest.py` hookimpl.
+  reporting plugin's side effects must fire exactly once under warden, two
+  opt-in mitigations are available:
+  - **`--warden-disable-worker-plugin=NAME`** (repeatable) disables a
+    *named* plugin inside worker subprocesses only (`-p no:NAME`), leaving
+    only the controller's replay. This only works for plugins registered
+    under a name — a `pytest11` entry-point install, or an explicit
+    `pluginmanager.register(obj, name=...)` call — **not** a bare hookimpl
+    defined directly in `conftest.py`, since `conftest.py` isn't itself a
+    nameable/blockable plugin.
+  - **The `PYTEST_WARDEN_WORKER` environment variable** is always set to
+    `"1"` inside every worker subprocess. Any hookimpl — named plugin or
+    bare `conftest.py` function — can check it to self-silence in workers
+    and rely solely on the controller's replay:
+    ```python
+    # conftest.py, BEFORE: fires twice under --warden (once for real in
+    # the worker, once more via the controller's replay)
+    def pytest_runtest_logreport(report):
+        if report.when == "call":
+            send_to_metrics_backend(report)
+
+
+    # conftest.py, AFTER: fires exactly once
+    import os
+
+
+    def pytest_runtest_logreport(report):
+        if os.environ.get("PYTEST_WARDEN_WORKER"):
+            return
+        if report.when == "call":
+            send_to_metrics_backend(report)
+    ```
 - **Know that session/module/class-scoped fixtures are scoped per worker,
   not once for the whole run.** Each worker is a fully separate `pytest`
   subprocess, so a `session`- or `module`-scoped fixture's state is created

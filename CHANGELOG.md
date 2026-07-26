@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--numprocesses` accepts a percentage (e.g. `--numprocesses=50%`),
   resolved against the available CPU count (`os.sched_getaffinity` where
   supported, else `os.cpu_count()`).
+- `--warden-disable-worker-plugin=NAME` (repeatable): disables a named
+  third-party plugin inside worker subprocesses only, via `-p no:NAME` --
+  only works for plugins registered under a name (pytest11 entry point or
+  explicit `pluginmanager.register(..., name=...)`), not bare
+  `conftest.py` hookimpls.
+- `PYTEST_WARDEN_WORKER=1` is now set in every worker subprocess's
+  environment, so a `conftest.py` hookimpl can self-silence in workers
+  (`if os.environ.get("PYTEST_WARDEN_WORKER"): return`) and rely solely on
+  the controller's replay -- this works for bare conftest.py hookimpls,
+  unlike `--warden-disable-worker-plugin`.
 
 ### Changed
 

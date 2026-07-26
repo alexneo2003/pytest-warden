@@ -143,5 +143,6 @@ def test_help_lists_all_warden_flags(pytester):
             "*--warden-quarantine-flaky*",
             "*--warden-work-stealing*",
             "*--warden-chunk-size=*",
+            "*--warden-disable-worker-plugin=*",
         ]
     )

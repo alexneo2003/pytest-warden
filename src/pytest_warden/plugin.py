@@ -88,6 +88,21 @@ def pytest_addoption(parser):
         help="Chunk size for --warden-work-stealing (default: total tests "
         "divided across roughly 4 chunks per worker).",
     )
+    group.addoption(
+        "--warden-disable-worker-plugin",
+        dest="warden_disable_worker_plugin",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="Disable a NAMED third-party pytest plugin inside worker "
+        "subprocesses only (passed to each worker as `-p no:NAME`), so its "
+        "hooks fire once via the controller's replay instead of once for "
+        "real in the worker AND once via replay. Repeatable. Only works for "
+        "plugins registered under a name (a pytest11 entry point, or an "
+        "explicit pluginmanager.register(..., name=...) call) -- it cannot "
+        "disable a bare hookimpl defined directly in a conftest.py; see the "
+        "PYTEST_WARDEN_WORKER environment variable in the README for that case.",
+    )
 
 
 class _HistoryCollector:
@@ -274,12 +289,20 @@ def _spawn_worker(session, batch, progress_path, cov_data_file):
     if maxfail:
         cmd.append(f"--maxfail={maxfail}")
 
-    env = None
+    for name in session.config.getoption("warden_disable_worker_plugin") or []:
+        cmd.extend(["-p", f"no:{name}"])
+
+    # Always set, not just when coverage is active, so a conftest.py
+    # hookimpl can self-silence in workers (see PYTEST_WARDEN_WORKER in the
+    # README) and rely solely on the controller's replay -- dict(os.environ)
+    # reproduces Popen's own default full-environment inheritance, so this
+    # is a pure addition for the non-coverage path, not a behavior change.
+    env = dict(os.environ)
+    env["PYTEST_WARDEN_WORKER"] = "1"
     if cov_data_file:
         for src in _cov_sources(session):
             cmd.append(f"--cov={src}")
         cmd.append("--cov-report=")
-        env = dict(os.environ)
         env["COVERAGE_FILE"] = cov_data_file
 
     proc = subprocess.Popen(
