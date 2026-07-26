@@ -153,8 +153,17 @@ def test_no_duplicate_report_for_a_hard_killed_test(pytester):
         """
     )
     result = pytester.runpytest("--warden", "--timeout=1")
+    # assert_outcomes(failed=1) is itself the "no duplicate report" proof:
+    # it reflects pytest's own report-stats accounting (one entry per
+    # logreport event), so a genuine duplicate report for this one test
+    # would show up as failed=2 here directly -- no need to additionally
+    # scrape stdout text for it. (A prior version of this test counted
+    # occurrences of the substring "hard-killed" in raw stdout instead,
+    # which is NOT a reliable proxy: pytest's short summary info line
+    # legitimately reproduces the same failure message a second time, and
+    # whether that second occurrence survives terminal-width truncation
+    # depends on the invoking environment's column width -- this passed
+    # locally but failed on real CI purely because of a wider terminal,
+    # with no actual duplicate report involved.)
     result.assert_outcomes(failed=1)
-    stdout = result.stdout.str()
-    assert stdout.count("hard-killed") == 1, (
-        f"expected exactly one hard-kill report, got {stdout.count('hard-killed')}:\n{stdout}"
-    )
+    result.stdout.fnmatch_lines(["*hard-killed*"])

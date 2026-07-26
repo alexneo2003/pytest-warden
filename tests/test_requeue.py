@@ -92,11 +92,16 @@ def test_no_duplicate_report_for_a_test_that_times_out_again_during_its_own_retr
         """
     )
     result = pytester.runpytest("--warden", "--numprocesses=1", "--timeout=1")
+    # assert_outcomes(passed=1, failed=2) is itself the "no duplicate
+    # report, no lost report" proof, reflecting pytest's own report-stats
+    # accounting directly -- a duplicate report for either hung test would
+    # show up as failed=3 here. (A prior version additionally counted
+    # occurrences of "hard-killed" in raw stdout, which depends on the
+    # invoking environment's terminal width via pytest's short-summary-line
+    # truncation -- not a reliable signal; see test_timeout.py's
+    # test_no_duplicate_report_for_a_hard_killed_test for the same fix.)
     result.assert_outcomes(passed=1, failed=2)
     stdout = result.stdout.str()
-    assert stdout.count("hard-killed") == 2, (
-        f"expected exactly one hard-kill report per hung test, got:\n{stdout}"
-    )
     assert "never reached this test" not in stdout, (
         "test_hangs_2 started on its retry worker -- it must be reported via "
         "the timeout path, not the never-ran path"
