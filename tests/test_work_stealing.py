@@ -1,5 +1,3 @@
-import time
-
 from pytest_warden.history import HistoryStore
 from pytest_warden.plugin import _chunk_queue, _default_chunk_size
 
@@ -38,38 +36,58 @@ def test_work_stealing_keeps_all_workers_busy_until_the_queue_drains(pytester):
     # 1/3/5 on worker 1 -- each worker's WHOLE batch then runs as ONE
     # subprocess, sequentially. Putting both slow tests at positions 0
     # and 2 means static batching would stack them on the SAME worker,
-    # running one after the other (~1.2s total). Work-stealing dispatches
-    # one test per chunk, so the second slow test lands on whichever slot
-    # happens to be free next -- here, the other slot, letting both slow
-    # tests run concurrently instead of sequentially (~0.6-0.7s total).
+    # running one after the other. Work-stealing dispatches one test per
+    # chunk, so the second slow test lands on whichever slot happens to be
+    # free next -- here, the other slot, letting both slow tests run
+    # concurrently instead of sequentially.
+    #
+    # Proven via overlapping start/end timestamps rather than a wall-clock
+    # threshold -- a fixed threshold is immune to nothing: a loaded/slow CI
+    # runner (Windows CI especially tends to have much higher
+    # subprocess-spawn overhead than local dev) could blow past a tight
+    # absolute threshold even when the scheduling itself is correct.
     pytester.makepyfile(
         test_mod="""
         import time
 
+        def _record(name, value):
+            with open("timing.txt", "a") as fh:
+                fh.write(f"{name} {value}\\n")
+
         def test_slow_a():
+            _record("a_start", time.monotonic())
             time.sleep(0.6)
+            _record("a_end", time.monotonic())
 
         def test_fast_1():
             pass
 
         def test_slow_b():
+            _record("b_start", time.monotonic())
             time.sleep(0.6)
+            _record("b_end", time.monotonic())
 
         def test_fast_2():
             pass
         """
     )
-    start = time.monotonic()
     result = pytester.runpytest(
         "--warden",
         "--numprocesses=2",
         "--warden-work-stealing",
         "--warden-chunk-size=1",
     )
-    elapsed = time.monotonic() - start
-
     result.assert_outcomes(passed=4)
-    assert elapsed < 1.15, f"took {elapsed}s -- looks like both slow tests ran sequentially"
+
+    timing = dict(line.split() for line in (pytester.path / "timing.txt").read_text().splitlines())
+    a_start, a_end = float(timing["a_start"]), float(timing["a_end"])
+    b_start, b_end = float(timing["b_start"]), float(timing["b_end"])
+    overlap = min(a_end, b_end) - max(a_start, b_start)
+    assert overlap > 0, (
+        f"test_slow_a and test_slow_b did not run concurrently -- looks like "
+        f"they ran sequentially on the same worker: a=({a_start}, {a_end}) "
+        f"b=({b_start}, {b_end})"
+    )
 
 
 def test_work_stealing_survives_a_crash_in_a_single_test_chunk(pytester):
