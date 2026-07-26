@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`if os.environ.get("PYTEST_WARDEN_WORKER"): return`) and rely solely on
   the controller's replay -- this works for bare conftest.py hookimpls,
   unlike `--warden-disable-worker-plugin`.
+- `warden_run_once` fixture and `pytest_warden.coordination.run_once`: run
+  a callable exactly once across an entire distributed `--warden`
+  invocation (all workers get the identical cached result), using a real
+  OS-level file lock (`fcntl.flock` / `msvcrt.locking`, no new dependency)
+  rather than a spin-poll. Also works in bare (non-`--warden`) runs with
+  zero contention, so fixture code doesn't need to branch on whether
+  warden is active.
+- `--warden-run-dir` (internal): the controller's per-invocation shared
+  temp directory, forwarded to every worker subprocess.
 
 ### Changed
 

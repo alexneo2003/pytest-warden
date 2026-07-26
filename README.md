@@ -183,8 +183,18 @@ never loop a run forever.
   independently in every worker that ends up running part of that module —
   the same trade-off `pytest-xdist` has. If a fixture's setup must run
   exactly once across an entire warden invocation (not once per worker),
-  it needs external coordination (a file lock, a shared service) — warden
-  doesn't provide one itself.
+  use the **`warden_run_once`** fixture:
+  ```python
+  @pytest.fixture(scope="session")
+  def my_fixture(warden_run_once):
+      return warden_run_once("my_fixture", _do_expensive_setup)
+  ```
+  `_do_expensive_setup` runs exactly once across the whole distributed run
+  (via a real OS-level file lock, not a spin-poll), and every worker's
+  `my_fixture` gets the identical result. Works unmodified in bare
+  (non-`--warden`) runs too, with zero contention. See
+  `pytest_warden.coordination.run_once` for the underlying primitive if
+  you need it outside a fixture.
 - **Reach for `--warden-work-stealing` only once plain LPT batching
   demonstrably isn't enough.** It helps specifically when tests have no
   history yet, or when a test's duration varies a lot run to run, so a

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import pytest
 from _pytest.reports import TestReport
 
+from pytest_warden import coordination
 from pytest_warden.history import HistoryStore
 from pytest_warden.jobobject import JobObject
 
@@ -132,6 +133,34 @@ def pytest_runtestloop(session):
         return None
     _run_controller(session)
     return True
+
+
+@pytest.fixture(scope="session")
+def warden_run_once(request, tmp_path_factory):
+    """Session-scoped fixture handing back a `run_once(key, fn)` callable
+    that runs `fn` exactly once across every worker of a single `--warden`
+    invocation, with every caller (including the one that actually ran
+    `fn`) getting the same result. Works unmodified in bare (non-`--warden`)
+    runs too -- there's no cross-process contention there, but it goes
+    through the exact same `coordination.run_once` code path rather than a
+    separate no-op shortcut, so there's exactly one implementation to keep
+    correct. Registered here (not in worker.py) specifically so it's
+    available in every process, not just worker subprocesses.
+    """
+    run_dir = request.config.getoption("warden_run_dir", default=None)
+    if not run_dir:
+        # Bare run, or the top-level controller process itself (which
+        # never gets --warden-run-dir -- only workers do): no other
+        # process to coordinate with, but route through the same shared-dir
+        # convention pytest-xdist's own community recipe uses for this
+        # exact problem (tmp_path_factory's own base temp dir's parent is
+        # stable for the whole session).
+        run_dir = str(tmp_path_factory.getbasetemp().parent)
+
+    def _call(key, fn):
+        return coordination.run_once(key, run_dir, fn)
+
+    return _call
 
 
 def _history_db_path(session):
@@ -274,7 +303,7 @@ def _cov_sources(session):
     return getattr(session.config.option, "cov_source", None)
 
 
-def _spawn_worker(session, batch, progress_path, cov_data_file):
+def _spawn_worker(session, batch, progress_path, cov_data_file, run_dir):
     cmd = [
         sys.executable,
         "-m",
@@ -283,6 +312,7 @@ def _spawn_worker(session, batch, progress_path, cov_data_file):
         "-p",
         "pytest_warden.worker",
         f"--warden-progress-file={progress_path}",
+        f"--warden-run-dir={run_dir}",
         "-q",
     ]
     maxfail = session.config.getvalue("maxfail")
@@ -537,7 +567,7 @@ def _run_wave(session, tmpdir, worker_count_start, batches, timeout):
         )
         worker_count += 1
         open(progress_path, "a", encoding="utf-8").close()
-        proc, job = _spawn_worker(session, batch, progress_path, cov_data_file)
+        proc, job = _spawn_worker(session, batch, progress_path, cov_data_file, tmpdir)
         workers.append(_Worker(proc, job, progress_path, timeout, batch, cov_data_file))
 
     _supervise(session, workers)
@@ -555,7 +585,7 @@ def _spawn_chunk_worker(session, tmpdir, worker_count, batch, timeout, is_retry=
         os.path.join(tmpdir, f".coverage.worker-{worker_count}") if cov_sources else None
     )
     open(progress_path, "a", encoding="utf-8").close()
-    proc, job = _spawn_worker(session, batch, progress_path, cov_data_file)
+    proc, job = _spawn_worker(session, batch, progress_path, cov_data_file, tmpdir)
     worker = _Worker(proc, job, progress_path, timeout, batch, cov_data_file, is_retry)
     return worker_count + 1, worker
 

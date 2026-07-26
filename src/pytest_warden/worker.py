@@ -7,6 +7,9 @@ TestReport objects to replay through its own top-level session.
 
 import json
 import os
+from pathlib import Path
+
+import pytest
 
 
 class _ProgressReporter:
@@ -38,9 +41,28 @@ def pytest_addoption(parser):
         default=None,
         help="Internal: path warden's worker-side plugin appends per-test JSON events to.",
     )
+    parser.addoption(
+        "--warden-run-dir",
+        action="store",
+        default=None,
+        help="Internal: shared per-invocation directory forwarded by the "
+        "controller for cross-worker coordination (see "
+        "pytest_warden.coordination.run_once / the warden_run_once fixture).",
+    )
 
 
 def pytest_configure(config):
     path = config.getoption("warden_progress_file")
     if path:
         config.pluginmanager.register(_ProgressReporter(path, config), "warden-progress-reporter")
+
+
+@pytest.fixture(scope="session")
+def warden_run_dir(request):
+    run_dir = request.config.getoption("warden_run_dir")
+    if not run_dir:
+        pytest.fail(
+            "warden_run_dir was requested but --warden-run-dir wasn't set -- "
+            "this fixture is only meaningful inside a warden worker subprocess."
+        )
+    return Path(run_dir)
