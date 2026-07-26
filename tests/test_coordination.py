@@ -156,3 +156,60 @@ def test_warden_run_once_fixture_works_in_bare_mode_with_zero_contention(pyteste
     result = pytester.runpytest()  # no --warden
     result.assert_outcomes(passed=2)
     assert (pytester.path / "calls.log").read_text().splitlines() == ["called"]
+
+
+def test_windows_lock_only_references_real_msvcrt_attribute_names():
+    # A strict fake msvcrt exposing ONLY the real module's actual constant
+    # names (LK_LOCK/LK_UNLCK, not a typo like LK_UNLOCK) -- unlike a
+    # MagicMock, referencing a wrong attribute name here raises
+    # AttributeError immediately, exactly catching a typo that a
+    # permissive mock would silently paper over. This is a real bug this
+    # test would have caught before it ever reached Windows CI: the
+    # _exclusive_lock finally-block referenced msvcrt.LK_UNLOCK, which
+    # doesn't exist (the real constant is LK_UNLCK).
+    #
+    # Deliberately does NOT use monkeypatch for sys.platform/sys.modules --
+    # fixture teardown order relative to a manual importlib.reload() inside
+    # a plain try/finally is unclear enough to risk leaking Windows-mode
+    # into later tests, so this restores both explicitly, in a known order,
+    # itself.
+    import importlib
+    import sys
+    import types
+
+    real_platform = sys.platform
+    had_msvcrt = "msvcrt" in sys.modules
+    real_msvcrt = sys.modules.get("msvcrt")
+
+    calls = []
+
+    def fake_locking(fd, mode, nbytes):
+        calls.append((mode, nbytes))
+
+    fake_msvcrt = types.SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=fake_locking)
+
+    import pytest_warden.coordination as coordination_module
+
+    try:
+        sys.modules["msvcrt"] = fake_msvcrt
+        sys.platform = "win32"
+        importlib.reload(coordination_module)
+
+        class _FakeFile:
+            def fileno(self):
+                return 42
+
+            def seek(self, pos):
+                pass
+
+        with coordination_module._exclusive_lock(_FakeFile()):
+            pass
+
+        assert calls == [(fake_msvcrt.LK_LOCK, 1), (fake_msvcrt.LK_UNLCK, 1)]
+    finally:
+        sys.platform = real_platform
+        if had_msvcrt:
+            sys.modules["msvcrt"] = real_msvcrt
+        else:
+            sys.modules.pop("msvcrt", None)
+        importlib.reload(coordination_module)

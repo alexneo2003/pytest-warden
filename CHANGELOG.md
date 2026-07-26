@@ -50,6 +50,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PYTEST_WARDEN_WORKER=1` from the outer invocation's environment, which
   previously caused a `conftest.py` self-guard hookimpl to incorrectly
   suppress the inner controller's own report replay.
+- `coordination.py`'s Windows lock path referenced `msvcrt.LK_UNLOCK`,
+  which doesn't exist (the real constant is `LK_UNLCK`) -- every call to
+  `run_once` on Windows raised `AttributeError` on unlock. Found via real
+  Windows CI, not locally (macOS/Linux have no `msvcrt` module to catch
+  this against).
+- A worker marked as hard-killed could still have a later, legitimate
+  completion event for the SAME test replayed if the underlying OS
+  process didn't die instantly (Job Object/process-group termination
+  isn't guaranteed instant) -- silently double-reporting that test once
+  via the hard-kill incident and once via its own late "real" outcome.
+  `_poll_once` now stops reading/replaying progress-channel content from
+  a worker entirely once it's been marked killed. Found via real Windows
+  CI, where Job Object termination latency made this pre-existing gap
+  manifest consistently; not previously caught locally.
 
 ## [0.1.0]
 

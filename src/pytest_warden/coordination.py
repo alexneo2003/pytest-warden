@@ -40,7 +40,7 @@ if IS_WINDOWS:
             yield
         finally:
             fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLOCK, 1)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 else:
     import fcntl
 

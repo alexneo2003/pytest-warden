@@ -646,23 +646,35 @@ def _poll_once(session, workers):
     now = time.monotonic()
     still_pending = []
     for worker in workers:
-        new_lines = _read_new_lines(worker)
-        if new_lines:
-            if worker.timeout:
-                worker.deadline = now + worker.timeout
-            for line in new_lines:
-                _replay_line(session, worker, line)
+        # Once a worker has been marked killed, its hard-kill incident has
+        # already been reported and worker.current already cleared -- stop
+        # reading/replaying ANY further progress-channel content from it.
+        # Job Object/process-group termination isn't guaranteed instant: if
+        # the underlying OS process keeps running a little longer and
+        # manages to write a legitimate completion event for the SAME test
+        # before it actually dies, replaying that event would silently
+        # double-report the test (once via the hard-kill incident, once
+        # via its own late "real" outcome) -- this guard prevents that
+        # regardless of how promptly the OS actually tears the process down.
+        if not worker.killed:
+            new_lines = _read_new_lines(worker)
+            if new_lines:
+                if worker.timeout:
+                    worker.deadline = now + worker.timeout
+                for line in new_lines:
+                    _replay_line(session, worker, line)
 
         if worker.proc.poll() is not None:
-            for line in _read_new_lines(worker):
-                _replay_line(session, worker, line)
-            if worker.current is not None:
-                code = worker.proc.returncode
-                _report_incident(
-                    session,
-                    worker,
-                    f"warden: worker exited unexpectedly (code {code}) while running this test",
-                )
+            if not worker.killed:
+                for line in _read_new_lines(worker):
+                    _replay_line(session, worker, line)
+                if worker.current is not None:
+                    code = worker.proc.returncode
+                    _report_incident(
+                        session,
+                        worker,
+                        f"warden: worker exited unexpectedly (code {code}) while running this test",
+                    )
             continue
 
         if worker.deadline is not None and now > worker.deadline and not worker.killed:

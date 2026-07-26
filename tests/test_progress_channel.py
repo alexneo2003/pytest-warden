@@ -204,3 +204,43 @@ def test_read_new_lines_handles_multibyte_utf8_nodeid_without_corrupting_the_off
     assert json.loads(first[0])["nodeid"] == "test_ééé"
     second = _read_new_lines(rig.worker)
     assert second == []
+
+
+def test_no_further_events_are_replayed_for_a_worker_once_it_is_marked_killed(rig):
+    # Hard-kill termination isn't guaranteed instant (Job Object/process-
+    # group termination can take a moment on some platforms) -- if the
+    # underlying process manages to write a legitimate completion event for
+    # the SAME test after the kill was already reported, it must not be
+    # replayed too (that would silently double-report the test: once via
+    # the hard-kill incident, once via its own late "real" outcome).
+    _write_lines(
+        rig.progress_path,
+        ['{"kind": "logstart", "nodeid": "test_a", "location": ["m.py", 0, "test_a"]}'],
+    )
+    _poll_once(rig.session, [rig.worker])
+    assert rig.worker.current == {"nodeid": "test_a", "location": ["m.py", 0, "test_a"]}
+
+    # Simulate the hard-kill having already fired (mirrors what
+    # _poll_once's own deadline branch does: mark killed, clear current).
+    rig.worker.killed = True
+    rig.worker.current = None
+    calls_before = list(rig.hook.calls)
+
+    # A late-arriving, otherwise-legitimate completion for the SAME test.
+    _write_lines(
+        rig.progress_path,
+        [
+            '{"kind": "logreport", "data": {"outcome": "passed"}}',
+            '{"kind": "logfinish", "nodeid": "test_a", "location": ["m.py", 0, "test_a"]}',
+        ],
+    )
+    _poll_once(rig.session, [rig.worker])
+    assert rig.hook.calls == calls_before, (
+        f"events arriving after worker.killed=True must not be replayed -- "
+        f"new calls appeared: {rig.hook.calls[len(calls_before) :]}"
+    )
+
+    # Same guard must also apply on the "worker has now exited" branch.
+    rig.proc.finish(returncode=-9)
+    _poll_once(rig.session, [rig.worker])
+    assert rig.hook.calls == calls_before
