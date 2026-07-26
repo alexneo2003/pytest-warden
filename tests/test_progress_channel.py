@@ -11,10 +11,18 @@ subprocess timing.
 
 import json
 import types
+import warnings
 
 import pytest
 
-from pytest_warden.plugin import _ACTIVE_WORKERS, _poll_once, _read_new_lines, _supervise, _Worker
+from pytest_warden.plugin import (
+    _ACTIVE_WORKERS,
+    _poll_once,
+    _read_new_lines,
+    _supervise,
+    _terminate_and_verify,
+    _Worker,
+)
 
 
 class _FakeProc:
@@ -331,3 +339,68 @@ def test_worker_still_in_flight_after_the_maxfail_grace_period_is_still_force_ki
         f"expected exactly one maxfail incident report for the stray in-flight "
         f"worker, got {len(reports)}"
     )
+
+
+class _StuckJob:
+    """job.terminate() never actually kills anything by itself -- the fake
+    proc below only reports exit once terminate() has been called twice,
+    simulating a first TerminateJobObject/TerminateProcess call that
+    silently has no effect (the scenario that made cluster B's hard-kill
+    take ~30s -- the full sleep duration -- instead of ~1s on Windows)."""
+
+    def __init__(self):
+        self.terminate_calls = 0
+
+    def terminate(self):
+        self.terminate_calls += 1
+
+
+class _StuckProc:
+    pid = 4242
+
+    def __init__(self, dies_after_n_terminates):
+        self._dies_after = dies_after_n_terminates
+        self.job = None  # set by the test after construction
+
+    def poll(self):
+        if self.job.terminate_calls >= self._dies_after:
+            return 1
+        return None
+
+
+def test_terminate_and_verify_retries_and_warns_when_the_first_kill_does_not_take(
+    monkeypatch,
+):
+    monkeypatch.setattr("pytest_warden.plugin._KILL_VERIFY_TIMEOUT", 0.05)
+    monkeypatch.setattr("pytest_warden.plugin._POLL_INTERVAL", 0.01)
+
+    job = _StuckJob()
+    proc = _StuckProc(dies_after_n_terminates=999)  # never actually dies here
+    proc.job = job
+    worker = types.SimpleNamespace(job=job, proc=proc)
+
+    with pytest.warns(UserWarning, match="did not exit within"):
+        _terminate_and_verify(worker)
+
+    assert job.terminate_calls == 2, (
+        f"expected one initial terminate() plus one retry after the verify "
+        f"window expired, got {job.terminate_calls} call(s)"
+    )
+
+
+def test_terminate_and_verify_does_not_warn_or_retry_once_the_process_actually_exits(
+    monkeypatch,
+):
+    monkeypatch.setattr("pytest_warden.plugin._KILL_VERIFY_TIMEOUT", 2.0)
+    monkeypatch.setattr("pytest_warden.plugin._POLL_INTERVAL", 0.01)
+
+    job = _StuckJob()
+    proc = _StuckProc(dies_after_n_terminates=1)  # dies right after the first terminate()
+    proc.job = job
+    worker = types.SimpleNamespace(job=job, proc=proc)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _terminate_and_verify(worker)
+
+    assert job.terminate_calls == 1, "the happy path must not retry once poll() confirms death"

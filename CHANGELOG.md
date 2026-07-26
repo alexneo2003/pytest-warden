@@ -74,6 +74,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remaining lines before deciding a report is owed) before force-killing.
   Found via real Windows CI, where slower per-event file I/O widened the
   race window enough to hit it reliably; the race is latent on every OS.
+- A hard-killed worker on Windows could keep running to full natural
+  completion instead of actually dying: `JobObject.assign` opened a
+  process handle purely to make the `AssignProcessToJobObject` call and
+  then discarded it, leaving no direct fallback if job-based tree
+  termination didn't take (an ambient outer Job Object -- e.g. the one
+  GitHub Actions' `windows-latest` runners already wrap the whole job step
+  in -- can silently block `TerminateJobObject` without raising a
+  Python-visible error), and `_poll_once` had no bound on how long it
+  would passively wait for the process to exit on its own afterward.
+  `JobObject` now retains the process handle and also calls
+  `TerminateProcess` on it directly as a fallback, and the controller now
+  verifies the kill actually took effect within a short bounded window,
+  retrying once and emitting a `UserWarning` if it still hasn't. Found via
+  real Windows CI: a `--timeout=1` hanging test took over 30s (the full
+  sleep duration) to fail instead of the expected ~1s, and its fixture
+  teardown finalizer visibly ran -- proof the process was never actually
+  killed, since a true hard kill cannot run teardown code.
 
 ## [0.1.0]
 

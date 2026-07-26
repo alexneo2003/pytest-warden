@@ -666,6 +666,34 @@ def _replay_line(session, worker, line):
         )
 
 
+_KILL_VERIFY_TIMEOUT = 2.0
+
+
+def _terminate_and_verify(worker):
+    # worker.job.terminate() is otherwise fire-and-forget -- nothing
+    # confirms the process actually died, so if the underlying kill call
+    # silently has no effect (observed in practice on Windows: an ambient
+    # outer Job Object's own nesting/breakaway policy can swallow
+    # TerminateJobObject without raising a Python-visible error), the
+    # caller falls back to passively polling proc.poll() with no bound,
+    # silently degrading into "wait for natural death" instead of a fast,
+    # loud failure. Bound the wait and retry once, warning if it still
+    # didn't take, so a genuinely-stuck kill is visible in CI output.
+    worker.job.terminate()
+    deadline = time.monotonic() + _KILL_VERIFY_TIMEOUT
+    while time.monotonic() < deadline:
+        if worker.proc.poll() is not None:
+            return
+        time.sleep(_POLL_INTERVAL)
+    if worker.proc.poll() is None:
+        warnings.warn(
+            f"warden: worker pid {worker.proc.pid} did not exit within "
+            f"{_KILL_VERIFY_TIMEOUT}s of termination -- retrying",
+            stacklevel=2,
+        )
+        worker.job.terminate()
+
+
 def _poll_once(session, workers):
     now = time.monotonic()
     still_pending = []
@@ -703,7 +731,7 @@ def _poll_once(session, workers):
 
         if worker.deadline is not None and now > worker.deadline and not worker.killed:
             worker.killed = True
-            worker.job.terminate()
+            _terminate_and_verify(worker)
             _report_incident(
                 session,
                 worker,
