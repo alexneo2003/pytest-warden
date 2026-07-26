@@ -64,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a worker entirely once it's been marked killed. Found via real Windows
   CI, where Job Object termination latency made this pre-existing gap
   manifest consistently; not previously caught locally.
+- `--maxfail` could double-report the very test that tripped it: replaying
+  its failing report and flipping `session.shouldfail` could land in the
+  same poll cycle where the worker's own `logfinish` write for that test
+  hadn't reached disk yet, so the immediate force-kill-and-report path in
+  `_supervise` / `_run_work_stealing` reported it a second time. Both now
+  give still-pending workers a short, bounded grace period to settle
+  through the normal "worker exited" path (which already drains all
+  remaining lines before deciding a report is owed) before force-killing.
+  Found via real Windows CI, where slower per-event file I/O widened the
+  race window enough to hit it reliably; the race is latent on every OS.
 
 ## [0.1.0]
 

@@ -20,6 +20,7 @@ from pytest_warden.jobobject import JobObject
 _POLL_INTERVAL = 0.05
 _HISTORY_WINDOW = 20
 _DEFAULT_WEIGHT = 1.0
+_MAXFAIL_GRACE_PERIOD = 2.0
 
 # Every _Worker spawned by the current _run_controller call, so a
 # KeyboardInterrupt (or any other exception) reaching _run_controller can
@@ -544,6 +545,29 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
                 active.append(worker)
 
         if session.shouldfail and active:
+            # See the matching comment in _supervise: a worker whose OWN
+            # test just tripped --maxfail is very likely already exiting on
+            # its own, and force-killing it immediately races its
+            # still-in-flight logfinish write, double-reporting the same
+            # test. Give it a short, bounded chance to settle through the
+            # normal "worker exited" path in _poll_once first.
+            grace_deadline = time.monotonic() + _MAXFAIL_GRACE_PERIOD
+            while active and time.monotonic() < grace_deadline:
+                time.sleep(_POLL_INTERVAL)
+                still_running = _poll_once(session, active)
+                finished = [w for w in active if w not in still_running]
+                for worker in finished:
+                    worker.job.close()
+                    remainder = [nid for nid in worker.batch if nid not in worker.started_ids]
+                    for nid in remainder:
+                        _report_never_ran(
+                            session,
+                            nid,
+                            "warden: worker never reached this test even after one retry",
+                        )
+                active = still_running
+
+        if session.shouldfail and active:
             # Unlike the "finished" branch above, and unlike _run_wave's
             # static-mode equivalent (which unconditionally closes every
             # worker's job after _supervise returns, regardless of exit
@@ -694,6 +718,21 @@ def _supervise(session, workers):
     pending = list(workers)
     while pending:
         pending = _poll_once(session, pending)
+
+        if session.shouldfail and pending:
+            # A worker whose OWN test just tripped this exact --maxfail
+            # threshold (workers run with the same --maxfail=N locally --
+            # see _spawn_worker) is very likely already exiting on its own.
+            # Force-killing it immediately races its still-in-flight
+            # logfinish write and double-reports the same test (once via
+            # the real failure, once via this incident). Give it a short,
+            # bounded chance to settle through the normal "worker exited"
+            # path in _poll_once first, which already drains all remaining
+            # lines before deciding whether a report is still owed.
+            grace_deadline = time.monotonic() + _MAXFAIL_GRACE_PERIOD
+            while pending and time.monotonic() < grace_deadline:
+                time.sleep(_POLL_INTERVAL)
+                pending = _poll_once(session, pending)
 
         if session.shouldfail and pending:
             for worker in pending:

@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from pytest_warden.plugin import _ACTIVE_WORKERS, _poll_once, _read_new_lines, _Worker
+from pytest_warden.plugin import _ACTIVE_WORKERS, _poll_once, _read_new_lines, _supervise, _Worker
 
 
 class _FakeProc:
@@ -30,6 +30,9 @@ class _FakeProc:
 
     def poll(self):
         return self.returncode if self._finished else None
+
+    def wait(self, timeout=None):
+        return self.returncode
 
 
 class _FakeJob:
@@ -244,3 +247,87 @@ def test_no_further_events_are_replayed_for_a_worker_once_it_is_marked_killed(ri
     rig.proc.finish(returncode=-9)
     _poll_once(rig.session, [rig.worker])
     assert rig.hook.calls == calls_before
+
+
+def _maxfail_incident_reports(hook):
+    return [
+        call
+        for call in hook.calls
+        if call[0] == "logreport"
+        and "worker terminated because --maxfail" in str(call[1]["report"].longrepr)
+    ]
+
+
+def test_worker_that_settles_within_the_maxfail_grace_period_is_not_double_reported(
+    rig, monkeypatch
+):
+    # Reproduces the TOCTOU race: the poll that reads test_a's failing
+    # logreport (which is what flips session.shouldfail, via pytest's own
+    # maxfail hook in a real run) can land in the SAME cycle where
+    # worker.current is still set, because the worker's logfinish write for
+    # that same test hasn't hit disk yet. The old code force-killed and
+    # reported an incident immediately in that situation, double-reporting
+    # test_a. The fix must give the worker a brief window to actually exit
+    # on its own first.
+    _write_lines(
+        rig.progress_path,
+        ['{"kind": "logstart", "nodeid": "test_a", "location": ["m.py", 0, "test_a"]}'],
+    )
+    pending = _poll_once(rig.session, [rig.worker])
+    assert pending == [rig.worker]
+    assert rig.worker.current == {"nodeid": "test_a", "location": ["m.py", 0, "test_a"]}
+
+    # Simulate session.shouldfail flipping true as a side effect of
+    # replaying test_a's failed report (pytest's own maxfail hook does
+    # this) in that exact poll -- while the worker's logfinish for test_a
+    # is still in flight, not yet on disk.
+    rig.session.shouldfail = True
+
+    settled = False
+
+    def fake_sleep(_seconds):
+        nonlocal settled
+        if not settled:
+            settled = True
+            _write_lines(
+                rig.progress_path,
+                ['{"kind": "logfinish", "nodeid": "test_a", "location": ["m.py", 0, "test_a"]}'],
+            )
+            rig.proc.finish(returncode=0)
+
+    monkeypatch.setattr("pytest_warden.plugin.time.sleep", fake_sleep)
+
+    _supervise(rig.session, pending)
+
+    assert _maxfail_incident_reports(rig.hook) == [], (
+        "worker settled on its own within the grace period -- test_a must not "
+        "also get a synthetic maxfail incident report on top of its real failure"
+    )
+
+
+def test_worker_still_in_flight_after_the_maxfail_grace_period_is_still_force_killed_and_reported(
+    rig, monkeypatch
+):
+    # Mirrors test_in_flight_test_on_a_worker_killed_due_to_maxfail_gets_a_report_not_silently_dropped:
+    # a worker that is genuinely still running a DIFFERENT, unrelated test
+    # when another worker trips --maxfail must still be force-killed and
+    # reported once the grace period expires -- the grace period must not
+    # turn into an unbounded wait or silently drop the report.
+    monkeypatch.setattr("pytest_warden.plugin._MAXFAIL_GRACE_PERIOD", 0.05)
+    monkeypatch.setattr("pytest_warden.plugin._POLL_INTERVAL", 0.01)
+
+    _write_lines(
+        rig.progress_path,
+        ['{"kind": "logstart", "nodeid": "test_a", "location": ["m.py", 0, "test_a"]}'],
+    )
+    pending = _poll_once(rig.session, [rig.worker])
+    rig.session.shouldfail = True
+
+    # Worker never finishes on its own -- proc.poll() stays None throughout.
+    _supervise(rig.session, pending)
+
+    reports = _maxfail_incident_reports(rig.hook)
+    assert len(reports) == 1, (
+        f"expected exactly one maxfail incident report for the stray in-flight "
+        f"worker, got {len(reports)}"
+    )
