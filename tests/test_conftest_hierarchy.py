@@ -1,9 +1,6 @@
 def _make_shadowed_fixture_project(pytester):
     (pytester.path / "conftest.py").write_text(
-        "import pytest\n\n"
-        "@pytest.fixture\n"
-        "def thing():\n"
-        "    return 'top'\n"
+        "import pytest\n\n@pytest.fixture\ndef thing():\n    return 'top'\n"
     )
     (pytester.path / "test_top.py").write_text(
         "def test_uses_thing(thing):\n    assert thing == 'top'\n"
@@ -12,14 +9,9 @@ def _make_shadowed_fixture_project(pytester):
     sub = pytester.path / "sub"
     sub.mkdir()
     (sub / "conftest.py").write_text(
-        "import pytest\n\n"
-        "@pytest.fixture\n"
-        "def thing():\n"
-        "    return 'sub'\n"
+        "import pytest\n\n@pytest.fixture\ndef thing():\n    return 'sub'\n"
     )
-    (sub / "test_sub.py").write_text(
-        "def test_uses_thing(thing):\n    assert thing == 'sub'\n"
-    )
+    (sub / "test_sub.py").write_text("def test_uses_thing(thing):\n    assert thing == 'sub'\n")
 
 
 def test_shadowed_fixture_resolves_correctly_within_a_single_worker(pytester):

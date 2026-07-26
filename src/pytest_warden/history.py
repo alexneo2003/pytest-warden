@@ -154,9 +154,7 @@ class HistoryStore:
             )
         return run_id
 
-    def get_durations(
-        self, test_id: str, project: str | None = None, window: int = 20
-    ) -> list:
+    def get_durations(self, test_id: str, project: str | None = None, window: int = 20) -> list:
         """Most recent `window` durations for a test, newest first --
         LPT sharding weight and flake-score window both consume this."""
         cur = self._conn.execute(
@@ -170,9 +168,7 @@ class HistoryStore:
         )
         return [row[0] for row in cur.fetchall()]
 
-    def get_outcomes(
-        self, test_id: str, project: str | None = None, window: int = 20
-    ) -> list:
+    def get_outcomes(self, test_id: str, project: str | None = None, window: int = 20) -> list:
         """Most recent `window` (outcome, attempts, retries_configured)
         rows for a test, newest first -- flake-score input."""
         cur = self._conn.execute(

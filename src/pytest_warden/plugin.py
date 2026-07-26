@@ -373,9 +373,7 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
         # makes range()'s step negative, so _chunk_queue silently returns an
         # empty queue -- the whole run then "succeeds" having run nothing at
         # all. Both are worse than a loud, immediate error.
-        raise pytest.UsageError(
-            f"--warden-chunk-size must be a positive integer, got {chunk_size}"
-        )
+        raise pytest.UsageError(f"--warden-chunk-size must be a positive integer, got {chunk_size}")
     previously_failed = frozenset(session.config.cache.get("cache/lastfailed", {}))
     # Each queue entry is (batch, is_retry) -- is_retry MUST travel with the
     # batch through the queue, not just live on the _Worker that ran it, or
@@ -454,9 +452,7 @@ def _run_wave(session, tmpdir, worker_count_start, batches, timeout):
     for batch in batches:
         progress_path = os.path.join(tmpdir, f"worker-{worker_count}.jsonl")
         cov_data_file = (
-            os.path.join(tmpdir, f".coverage.worker-{worker_count}")
-            if cov_sources
-            else None
+            os.path.join(tmpdir, f".coverage.worker-{worker_count}") if cov_sources else None
         )
         worker_count += 1
         open(progress_path, "a", encoding="utf-8").close()
@@ -487,9 +483,7 @@ def _combine_coverage(session, workers):
     if not _cov_sources(session):
         return
     data_files = [
-        w.cov_data_file
-        for w in workers
-        if w.cov_data_file and os.path.exists(w.cov_data_file)
+        w.cov_data_file for w in workers if w.cov_data_file and os.path.exists(w.cov_data_file)
     ]
     if not data_files:
         return
@@ -556,7 +550,7 @@ def _supervise(session, workers):
 
 
 def _read_new_lines(worker):
-    with open(worker.progress_path, "r", encoding="utf-8") as fh:
+    with open(worker.progress_path, encoding="utf-8") as fh:
         all_lines = fh.readlines()
     complete = [line for line in all_lines if line.endswith("\n")]
     new = complete[worker.lines_consumed :]
@@ -571,9 +565,7 @@ def _replay_event(session, worker, event):
     if kind == "logstart":
         worker.started_ids.add(event["nodeid"])
         worker.current = {"nodeid": event["nodeid"], "location": event["location"]}
-        hook.pytest_runtest_logstart(
-            nodeid=event["nodeid"], location=tuple(event["location"])
-        )
+        hook.pytest_runtest_logstart(nodeid=event["nodeid"], location=tuple(event["location"]))
     elif kind == "logreport":
         report = hook.pytest_report_from_serializable(config=config, data=event["data"])
         # Captured before quarantine may rewrite report.outcome (failed ->
@@ -586,9 +578,7 @@ def _replay_event(session, worker, event):
         hook.pytest_runtest_logreport(report=report)
     elif kind == "logfinish":
         worker.current = None
-        hook.pytest_runtest_logfinish(
-            nodeid=event["nodeid"], location=tuple(event["location"])
-        )
+        hook.pytest_runtest_logfinish(nodeid=event["nodeid"], location=tuple(event["location"]))
 
 
 def _report_incident(session, worker, message):

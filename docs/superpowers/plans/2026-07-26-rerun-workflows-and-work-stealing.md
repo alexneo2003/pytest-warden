@@ -148,8 +148,7 @@ def test_lpt_batching_puts_previously_failed_tests_first_within_a_worker(pyteste
     second = pytester.runpytest("--warden", "--numprocesses=1", "--failed-first")
     second.assert_outcomes(passed=2, failed=1)
     lines = [
-        line for line in second.outlines
-        if "test_a" in line or "test_b" in line or "test_c" in line
+        line for line in second.outlines if "test_a" in line or "test_b" in line or "test_c" in line
     ]
     # test_b (previously failed) must be the first test line reported.
     assert "test_b" in lines[0], f"expected test_b first, got: {lines[0]}"
@@ -178,7 +177,9 @@ def test_lpt_batching_puts_previously_failed_tests_first_even_when_slower(pytest
 
     second = pytester.runpytest("--warden", "--numprocesses=1", "--failed-first")
     lines = [line for line in second.outlines if "test_a" in line or "test_b" in line]
-    assert "test_b" in lines[0], f"expected test_b (failed-first) ahead of slower test_a, got: {lines[0]}"
+    assert "test_b" in lines[0], (
+        f"expected test_b (failed-first) ahead of slower test_a, got: {lines[0]}"
+    )
 ```
 
 This version is guaranteed to fail against the current weight-only sort, since `test_a`'s recorded duration (~0.2s) outweighs `test_b`'s (~0s), putting `test_a` first under pure LPT.
@@ -466,7 +467,9 @@ In `plugin.py:198-210`, add the field:
 
 ```python
 class _Worker:
-    def __init__(self, proc, job, progress_path, timeout, batch, cov_data_file=None, is_retry=False):
+    def __init__(
+        self, proc, job, progress_path, timeout, batch, cov_data_file=None, is_retry=False
+    ):
         self.proc = proc
         self.job = job
         self.progress_path = progress_path

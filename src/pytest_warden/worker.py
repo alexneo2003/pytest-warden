@@ -18,9 +18,7 @@ class _ProgressReporter:
         self._write({"kind": "logstart", "nodeid": nodeid, "location": list(location)})
 
     def pytest_runtest_logreport(self, report):
-        data = self.config.hook.pytest_report_to_serializable(
-            config=self.config, report=report
-        )
+        data = self.config.hook.pytest_report_to_serializable(config=self.config, report=report)
         self._write({"kind": "logreport", "data": data})
 
     def pytest_runtest_logfinish(self, nodeid, location):
@@ -45,6 +43,4 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     path = config.getoption("warden_progress_file")
     if path:
-        config.pluginmanager.register(
-            _ProgressReporter(path, config), "warden-progress-reporter"
-        )
+        config.pluginmanager.register(_ProgressReporter(path, config), "warden-progress-reporter")

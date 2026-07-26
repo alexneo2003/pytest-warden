@@ -2,6 +2,7 @@
 name = "pytest-warden"
 version = "0.1.0"
 description = "Windows Job Object hard-kill supervision for real pytest subprocesses — a drop-in replacement for pytest-xdist + pytest-timeout on hang-prone CI."
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "pytest>=7",
@@ -22,4 +23,29 @@ packages = ["src/pytest_warden"]
 dev = [
     "pytest>=7",
     "pytest-cov>=5",
+    "ruff>=0.8",
+    "ty>=0.0.1a1",
 ]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",  # line length is handled by the formatter, not worth hard-failing lint on
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pytest_warden"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ty.environment]
+python-version = "3.9"
+
+[tool.ty.src]
+include = ["src/pytest_warden"]
+exclude = ["tests"]

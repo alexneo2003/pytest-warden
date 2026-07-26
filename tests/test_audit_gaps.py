@@ -87,15 +87,9 @@ def test_quarantining_a_failure_still_records_it_as_failed_in_history(pytester):
     )
     history_db = str(pytester.path / "history.sqlite3")
 
-    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(
-        passed=1
-    )
-    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(
-        failed=1
-    )
-    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(
-        passed=1
-    )
+    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(passed=1)
+    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(failed=1)
+    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(passed=1)
 
     # Run 4 fails again, but this time quarantine is on -- reported as
     # xfail, build stays green. The bug: does history record this as
@@ -138,9 +132,7 @@ def test_coverage_combine_does_not_crash_when_a_worker_is_hard_killed(pytester):
             time.sleep(30)
         """
     )
-    result = pytester.runpytest(
-        "--warden", "--numprocesses=1", "--timeout=1", "--cov=mod"
-    )
+    result = pytester.runpytest("--warden", "--numprocesses=1", "--timeout=1", "--cov=mod")
     result.assert_outcomes(passed=1, failed=1)
     # The point: this must not raise (e.g. coverage.CoverageException) and
     # abort the whole run just because one worker's data was incomplete.
@@ -170,9 +162,7 @@ def test_coverage_loss_from_a_hard_kill_is_scoped_to_that_workers_batch(pytester
             time.sleep(30)
         """
     )
-    result = pytester.runpytest(
-        "--warden", "--numprocesses=2", "--timeout=1", "--cov=mod"
-    )
+    result = pytester.runpytest("--warden", "--numprocesses=2", "--timeout=1", "--cov=mod")
     result.assert_outcomes(passed=1, failed=1)
 
     import coverage
@@ -253,9 +243,7 @@ def test_negative_chunk_size_is_rejected_instead_of_silently_running_nothing(pyt
             assert True
         """
     )
-    result = pytester.runpytest(
-        "--warden", "--warden-work-stealing", "--warden-chunk-size=-1"
-    )
+    result = pytester.runpytest("--warden", "--warden-work-stealing", "--warden-chunk-size=-1")
     assert result.ret != 0
     result.stderr.fnmatch_lines(["*--warden-chunk-size must be a positive integer*"])
 
@@ -267,9 +255,7 @@ def test_zero_chunk_size_is_rejected_instead_of_silently_substituting_the_defaul
             assert True
         """
     )
-    result = pytester.runpytest(
-        "--warden", "--warden-work-stealing", "--warden-chunk-size=0"
-    )
+    result = pytester.runpytest("--warden", "--warden-work-stealing", "--warden-chunk-size=0")
     assert result.ret != 0
     result.stderr.fnmatch_lines(["*--warden-chunk-size must be a positive integer*"])
 
@@ -312,7 +298,7 @@ def test_work_stealing_also_prioritizes_previously_failed_tests_for_failed_first
 
     (pytester.path / "order.txt").unlink()
 
-    second = pytester.runpytest(
+    pytester.runpytest(
         "--warden",
         "--numprocesses=1",
         "--failed-first",
@@ -321,8 +307,7 @@ def test_work_stealing_also_prioritizes_previously_failed_tests_for_failed_first
     )
     order = (pytester.path / "order.txt").read_text().splitlines()
     assert order[0] == "test_b", (
-        f"expected test_b (failed-first) to run before test_a under "
-        f"work-stealing too, got: {order}"
+        f"expected test_b (failed-first) to run before test_a under work-stealing too, got: {order}"
     )
 
 

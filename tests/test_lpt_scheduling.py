@@ -40,6 +40,4 @@ def test_lpt_uses_history_to_avoid_stacking_two_slow_tests_on_one_worker(pyteste
     elapsed = time.monotonic() - start
 
     result2.assert_outcomes(passed=4)
-    assert elapsed < 1.0, (
-        f"took {elapsed}s -- looks like both slow tests landed on the same worker"
-    )
+    assert elapsed < 1.0, f"took {elapsed}s -- looks like both slow tests landed on the same worker"

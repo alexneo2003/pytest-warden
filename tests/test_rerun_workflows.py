@@ -64,6 +64,8 @@ def test_lpt_batching_puts_previously_failed_tests_first_even_when_slower(pytest
 
     (pytester.path / "order.txt").unlink()
 
-    second = pytester.runpytest("--warden", "--numprocesses=1", "--failed-first")
+    pytester.runpytest("--warden", "--numprocesses=1", "--failed-first")
     order = (pytester.path / "order.txt").read_text().splitlines()
-    assert order[0] == "test_b", f"expected test_b (failed-first) to run before test_a, got: {order}"
+    assert order[0] == "test_b", (
+        f"expected test_b (failed-first) to run before test_a, got: {order}"
+    )
