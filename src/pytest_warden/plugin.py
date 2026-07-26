@@ -41,9 +41,11 @@ def pytest_addoption(parser):
         "--numprocesses",
         dest="warden_numprocesses",
         action="store",
-        type=int,
-        default=1,
-        help="Number of hard-killable pytest worker subprocesses to distribute tests across.",
+        type=str,
+        default="1",
+        help="Number of hard-killable pytest worker subprocesses to distribute "
+        "tests across. Accepts a positive integer, or a percentage of the "
+        "available CPU count (e.g. '50%%').",
     )
     group.addoption(
         "--timeout",
@@ -145,6 +147,46 @@ def _lpt_batch(node_ids, numprocesses, history_store, previously_failed=frozense
         batches[i].append(node_id)
         loads[i] += weights[node_id]
     return [batch for batch in batches if batch]
+
+
+def _available_cpu_count():
+    # sched_getaffinity respects cgroup/container CPU limits (Linux only);
+    # everywhere else, cpu_count() is the best available signal.
+    sched_getaffinity = getattr(os, "sched_getaffinity", None)
+    if sched_getaffinity is not None:
+        try:
+            return len(sched_getaffinity(0))
+        except OSError:
+            pass
+    return os.cpu_count() or 1
+
+
+def _resolve_numprocesses(raw, cpu_count_fn=None):
+    cpu_count_fn = cpu_count_fn or _available_cpu_count
+    text = raw.strip()
+    error = pytest.UsageError(
+        f"--numprocesses must be a positive integer or a percentage like '50%', got {raw!r}"
+    )
+    if text.endswith("%"):
+        try:
+            pct = float(text[:-1])
+        except ValueError:
+            raise error from None
+        if pct <= 0:
+            raise error
+        # A tiny-but-positive percentage rounding down to 0 workers still
+        # means "as few as possible", not "none" -- clamp up to 1 rather
+        # than treating it as an error, unlike an explicitly non-positive
+        # request (0%/negative), which IS rejected above.
+        return max(1, round(cpu_count_fn() * pct / 100))
+
+    try:
+        value = int(text)
+    except ValueError:
+        raise error from None
+    if value <= 0:
+        raise error
+    return value
 
 
 def _default_chunk_size(total, numprocesses):
@@ -293,7 +335,7 @@ def _run_controller(session):
     if not node_ids:
         return
 
-    numprocesses = session.config.getoption("warden_numprocesses")
+    numprocesses = _resolve_numprocesses(session.config.getoption("warden_numprocesses"))
     timeout = session.config.getoption("warden_timeout")
     if timeout is not None and timeout <= 0:
         # `if worker.timeout:` elsewhere is a truthiness check, so an

@@ -48,7 +48,7 @@ pytest --warden --numprocesses=4 --timeout=60
 | Flag | Purpose |
 |---|---|
 | `--warden` | Activates warden for this run. Without it, behavior is identical to bare pytest. |
-| `--numprocesses` | Number of worker subprocesses to distribute tests across (default: 1). |
+| `--numprocesses` | Number of worker subprocesses to distribute tests across (default: 1). Accepts an integer or a percentage of available CPU count, e.g. `50%`. |
 | `--timeout` | Per-test timeout in seconds. A test exceeding it hard-kills its whole worker. Overridable per-test with `@pytest.mark.timeout(N)`. |
 | `--maxfail` | Standard pytest flag — forwarded to workers and enforced across the whole distributed run, not just within one worker. |
 | `--cov=<source>` | Standard pytest-cov flag — coverage is measured per worker and combined into a single `.coverage` file at the rootdir. |
@@ -115,7 +115,10 @@ never loop a run forever.
   optimizes the split you already have, it can't fix a worker count that's
   fundamentally too high for the machine running the tests, and spawning
   more worker subprocesses than the machine can actually run in parallel
-  just adds startup overhead without shortening the run.
+  just adds startup overhead without shortening the run. `--numprocesses=50%`
+  is a convenient shorthand for "close to my CPU core count" without
+  needing to know the exact number — it resolves against the available
+  CPU count (respecting container/cgroup limits on Linux) at run time.
 - **Treat `--warden-quarantine-flaky` as a visibility tool, not a fix.** A
   quarantined test still shows up as `xfail` in every report — it's meant
   to stop a known-flaky test from blocking a build while it's investigated,

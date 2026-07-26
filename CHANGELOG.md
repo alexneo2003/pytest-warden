@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--numprocesses` accepts a percentage (e.g. `--numprocesses=50%`),
+  resolved against the available CPU count (`os.sched_getaffinity` where
+  supported, else `os.cpu_count()`).
+
+### Changed
+
+- `--numprocesses`: now rejects 0/negative/unparseable values with a
+  `pytest.UsageError` instead of silently clamping to 1, matching
+  `--timeout`/`--warden-chunk-size`'s existing validation convention.
+
 ## [0.1.0]
 
 ### Added

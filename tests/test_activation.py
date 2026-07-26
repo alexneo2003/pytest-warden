@@ -1,5 +1,39 @@
 import time
 
+import pytest
+
+from pytest_warden.plugin import _resolve_numprocesses
+
+
+def test_resolve_numprocesses_accepts_plain_positive_int():
+    assert _resolve_numprocesses("4") == 4
+
+
+def test_resolve_numprocesses_rejects_zero_and_negative_int():
+    for raw in ("0", "-1"):
+        with pytest.raises(pytest.UsageError, match="positive integer"):
+            _resolve_numprocesses(raw)
+
+
+def test_resolve_numprocesses_rejects_non_numeric_garbage():
+    with pytest.raises(pytest.UsageError, match="positive integer"):
+        _resolve_numprocesses("abc")
+
+
+def test_resolve_numprocesses_percentage_uses_injected_cpu_count():
+    assert _resolve_numprocesses("50%", cpu_count_fn=lambda: 8) == 4
+    assert _resolve_numprocesses("25%", cpu_count_fn=lambda: 8) == 2
+
+
+def test_resolve_numprocesses_percentage_rounds_up_to_at_least_one_worker():
+    assert _resolve_numprocesses("1%", cpu_count_fn=lambda: 4) == 1
+
+
+def test_resolve_numprocesses_rejects_zero_and_negative_percentage():
+    for raw in ("0%", "-10%"):
+        with pytest.raises(pytest.UsageError, match="positive integer"):
+            _resolve_numprocesses(raw, cpu_count_fn=lambda: 8)
+
 
 def test_warden_flag_is_recognized(pytester):
     pytester.makepyfile(
@@ -45,17 +79,10 @@ def test_warden_specific_flags_have_no_effect_without_the_warden_flag(pytester):
     )
 
 
-def test_negative_numprocesses_is_silently_clamped_to_one_documents_current_behavior(pytester):
-    # Unlike --timeout=0/negative and --warden-chunk-size=0/negative, which
-    # are explicitly rejected with a UsageError (see test_audit_gaps.py),
-    # --numprocesses has no such validation: _lpt_batch's
-    # `max(1, min(numprocesses, len(node_ids)))` and _default_chunk_size's
-    # `max(1, numprocesses)` both silently clamp 0/negative to 1 instead of
-    # raising. This documents that inconsistency as CURRENT behavior rather
-    # than assuming either way is correct -- surfaced to the maintainer as
-    # a judgment call (arguably fine, since "at least 1 worker" is a
-    # reasonable reading of a nonsensical request, unlike --timeout=0's
-    # actively misleading "unlimited" reading) rather than auto-fixed here.
+def test_negative_numprocesses_is_rejected_instead_of_silently_clamped(pytester):
+    # Was previously silently clamped to 1, inconsistent with --timeout and
+    # --warden-chunk-size's existing explicit-rejection convention -- now
+    # matches them.
     pytester.makepyfile(
         """
         def test_ok():
@@ -63,8 +90,46 @@ def test_negative_numprocesses_is_silently_clamped_to_one_documents_current_beha
         """
     )
     result = pytester.runpytest("--warden", "--numprocesses=-1")
-    result.assert_outcomes(passed=1)
-    result.stderr.no_fnmatch_line("*UsageError*")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--numprocesses must be a positive integer*"])
+
+
+def test_zero_numprocesses_is_rejected(pytester):
+    pytester.makepyfile(
+        """
+        def test_ok():
+            assert True
+        """
+    )
+    result = pytester.runpytest("--warden", "--numprocesses=0")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--numprocesses must be a positive integer*"])
+
+
+def test_non_numeric_numprocesses_is_rejected(pytester):
+    pytester.makepyfile(
+        """
+        def test_ok():
+            assert True
+        """
+    )
+    result = pytester.runpytest("--warden", "--numprocesses=abc")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--numprocesses must be a positive integer*"])
+
+
+def test_numprocesses_percentage_is_accepted_end_to_end(pytester):
+    pytester.makepyfile(
+        """
+        def test_a():
+            assert True
+
+        def test_b():
+            assert True
+        """
+    )
+    result = pytester.runpytest("--warden", "--numprocesses=50%")
+    result.assert_outcomes(passed=2)
 
 
 def test_help_lists_all_warden_flags(pytester):
