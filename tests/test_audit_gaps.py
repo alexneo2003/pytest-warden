@@ -187,6 +187,62 @@ def test_coverage_loss_from_a_hard_kill_is_scoped_to_that_workers_batch(pytester
     )
 
 
+def test_worker_that_never_starts_a_single_test_gets_its_whole_batch_retried_once(pytester):
+    # A worker can fail before running ANY test at all -- e.g. a broken
+    # conftest.py causing a collection error inside the worker specifically
+    # (not the controller, which already collected successfully to get
+    # here). Distinguishing marker: only worker invocations carry
+    # --warden-progress-file, so this conftest only misbehaves there.
+    pytester.makepyfile(
+        conftest="""
+        def pytest_configure(config):
+            if config.getoption("warden_progress_file", None):
+                import os
+                os._exit(70)
+        """,
+    )
+    pytester.makepyfile(
+        test_mod="""
+        def test_a():
+            assert True
+
+        def test_b():
+            assert True
+        """
+    )
+    result = pytester.runpytest("--warden", "--numprocesses=1")
+    result.assert_outcomes(failed=2)
+    result.stdout.fnmatch_lines(["*never reached this test even after one retry*"])
+
+
+def test_zero_timeout_is_rejected_instead_of_silently_meaning_unlimited(pytester):
+    # `if worker.timeout:` is a truthiness check, so --timeout=0 is
+    # currently indistinguishable from --timeout not being given at all --
+    # a user typing --timeout=0 almost certainly means "fail immediately",
+    # not "disable the hard-kill guarantee entirely" (the opposite intent).
+    pytester.makepyfile(
+        """
+        def test_ok():
+            assert True
+        """
+    )
+    result = pytester.runpytest("--warden", "--timeout=0")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--timeout must be a positive number*"])
+
+
+def test_negative_timeout_is_rejected(pytester):
+    pytester.makepyfile(
+        """
+        def test_ok():
+            assert True
+        """
+    )
+    result = pytester.runpytest("--warden", "--timeout=-1")
+    assert result.ret != 0
+    result.stderr.fnmatch_lines(["*--timeout must be a positive number*"])
+
+
 def test_negative_chunk_size_is_rejected_instead_of_silently_running_nothing(pytester):
     pytester.makepyfile(
         """

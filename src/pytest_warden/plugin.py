@@ -277,6 +277,12 @@ def _run_controller(session):
 
     numprocesses = session.config.getoption("warden_numprocesses")
     timeout = session.config.getoption("warden_timeout")
+    if timeout is not None and timeout <= 0:
+        # `if worker.timeout:` elsewhere is a truthiness check, so an
+        # unvalidated 0 would be silently indistinguishable from --timeout
+        # not being given at all -- the opposite of what a user typing
+        # --timeout=0 almost certainly means.
+        raise pytest.UsageError(f"--timeout must be a positive number, got {timeout}")
     work_stealing = session.config.getoption("warden_work_stealing")
 
     _ACTIVE_WORKERS.clear()
