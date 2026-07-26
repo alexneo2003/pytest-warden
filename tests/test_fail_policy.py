@@ -108,7 +108,9 @@ def test_retries_plus_maxfail_together_do_not_corrupt_total_test_count(pytester)
     total_accounted = sum(
         outcomes.get(key, 0) for key in ("passed", "failed", "skipped", "errors", "error")
     )
-    assert total_accounted == 4, f"expected all 4 collected tests accounted for, got {dict(outcomes)}"
+    assert total_accounted == 4, (
+        f"expected all 4 collected tests accounted for, got {dict(outcomes)}"
+    )
 
 
 def test_maxfail_tripped_by_a_hard_killed_test_stops_the_retry_wave_from_spawning(pytester):

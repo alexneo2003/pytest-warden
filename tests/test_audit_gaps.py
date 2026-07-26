@@ -444,7 +444,6 @@ def test_sigint_terminates_running_workers_under_work_stealing_too(pytester):
             proc.wait()
 
 
-
 def test_worker_internal_error_not_just_a_clean_os_exit_crash_is_handled_the_same_way(pytester):
     # Distinct from the os._exit(70)-based "never starts" test above: a
     # genuine uncaught Python exception during worker-side collection

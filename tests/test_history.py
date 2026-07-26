@@ -130,9 +130,7 @@ def test_concurrent_history_store_access_does_not_deadlock_or_corrupt(pytester):
         "-q",
         str(pytester.path),
     ]
-    procs = [
-        subprocess.Popen(cmd, cwd=str(pytester.path), env=None) for _ in range(3)
-    ]
+    procs = [subprocess.Popen(cmd, cwd=str(pytester.path), env=None) for _ in range(3)]
     returncodes = [p.wait(timeout=30) for p in procs]
     assert all(rc == 0 for rc in returncodes), f"expected all runs to succeed, got {returncodes}"
 
