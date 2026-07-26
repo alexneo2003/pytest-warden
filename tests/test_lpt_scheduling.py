@@ -1,3 +1,53 @@
+import random
+
+from pytest_warden.history import HistoryStore
+from pytest_warden.plugin import _lpt_batch
+
+
+def test_lpt_batch_never_loses_or_duplicates_a_node_id(tmp_path):
+    store = HistoryStore(str(tmp_path / "history.sqlite3"))
+    try:
+        node_ids = [f"test_mod.py::test_{i}" for i in range(37)]
+        store.record_run(
+            [
+                _fake_result(node_ids[i], duration=random.Random(i).uniform(0.01, 2.0))
+                for i in range(0, 37, 3)  # sparse/mixed history -- some ids have none at all
+            ]
+        )
+        batches = _lpt_batch(node_ids, numprocesses=5, history_store=store)
+        assert sorted(sum(batches, [])) == sorted(node_ids)
+        assert len(set(sum(batches, []))) == len(node_ids)
+    finally:
+        store.close()
+
+
+def test_lpt_batch_degenerates_to_even_split_with_no_history(tmp_path):
+    store = HistoryStore(str(tmp_path / "history.sqlite3"))
+    try:
+        node_ids = [f"test_mod.py::test_{i}" for i in range(10)]
+        batches = _lpt_batch(node_ids, numprocesses=3, history_store=store)
+        sizes = sorted(len(b) for b in batches)
+        assert sizes[-1] - sizes[0] <= 1, f"expected an even split with no history, got {sizes}"
+        assert sum(sizes) == 10
+    finally:
+        store.close()
+
+
+def _fake_result(test_id, duration):
+    from dataclasses import dataclass
+
+    @dataclass
+    class _Result:
+        test_id: str
+        project: str | None
+        duration: float
+        outcome: str
+        attempts: int = 1
+        retries_configured: int = 0
+
+    return _Result(test_id=test_id, project=None, duration=duration, outcome="passed")
+
+
 def test_lpt_uses_history_to_avoid_stacking_two_slow_tests_on_one_worker(pytester):
     # Each slow test records its own start/end monotonic timestamp to a
     # shared file. Overlapping intervals prove the two ran concurrently on

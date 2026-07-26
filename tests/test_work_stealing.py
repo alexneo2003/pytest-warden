@@ -2,6 +2,27 @@ from pytest_warden.history import HistoryStore
 from pytest_warden.plugin import _chunk_queue, _default_chunk_size
 
 
+def test_chunk_queue_never_loses_or_duplicates_a_node_id(tmp_path):
+    store = HistoryStore(str(tmp_path / "history.sqlite3"))
+    try:
+        node_ids = [f"test_mod.py::test_{i}" for i in range(23)]
+        chunks = _chunk_queue(node_ids, store, chunk_size=4)
+        assert sorted(sum(chunks, [])) == sorted(node_ids)
+        assert len(set(sum(chunks, []))) == len(node_ids)
+    finally:
+        store.close()
+
+
+def test_chunk_size_larger_than_total_tests_produces_one_chunk(tmp_path):
+    store = HistoryStore(str(tmp_path / "history.sqlite3"))
+    try:
+        chunks = _chunk_queue(["a", "b", "c"], store, chunk_size=1000)
+        assert len(chunks) == 1
+        assert sorted(chunks[0]) == ["a", "b", "c"]
+    finally:
+        store.close()
+
+
 def test_work_stealing_flag_is_recognized(pytester):
     pytester.makepyfile(
         """
