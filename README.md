@@ -135,11 +135,10 @@ never loop a run forever.
 
 ## Platform notes
 
-Developed and tested on macOS/Linux, exercising the POSIX process-group
-fallback in `jobobject.py`. The Windows-specific `win32job`-based branch
-has not yet been exercised against a real Windows CI run — a
-`windows-latest` job is scaffolded in `.github/workflows/ci.yml`, pending
-this repo having a CI-connected remote.
+Developed on macOS/Linux, exercising the POSIX process-group fallback in
+`jobobject.py` locally. The Windows-specific `win32job`-based branch is
+verified on real Windows CI — `.github/workflows/ci.yml` runs the full
+suite on both `ubuntu-latest` and `windows-latest` on every push.
 
 pytest reserves all lowercase short options (`-x`, `-n`, etc.) for its own
 core plugins as of pytest 9.x — only long-form flags (`--numprocesses`,
