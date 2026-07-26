@@ -111,6 +111,42 @@ def test_work_stealing_survives_a_crash_in_a_single_test_chunk(pytester):
     result.assert_outcomes(passed=2, failed=1)
 
 
+def test_work_stealing_chunk_that_crashes_again_on_its_retry_is_marked_failed_not_requeued_a_third_time(
+    pytester,
+):
+    # test_a passes; test_crash1 crashes immediately, leaving [test_crash2,
+    # test_never] as a never-started remainder of size 2 -- requeued once as
+    # a single retry chunk with is_retry=True. On the retry, test_crash2 (the
+    # first item of the retry chunk) crashes AGAIN, leaving test_never as a
+    # never-started remainder of an already-is_retry chunk -- it must be
+    # marked never-ran, not requeued a third time.
+    pytester.makepyfile(
+        test_mod="""
+        import os
+
+        def test_a():
+            assert True
+
+        def test_crash1():
+            os._exit(70)
+
+        def test_crash2():
+            os._exit(71)
+
+        def test_never():
+            assert True
+        """
+    )
+    result = pytester.runpytest(
+        "--warden", "--numprocesses=1", "--warden-work-stealing", "--warden-chunk-size=4"
+    )
+    # test_a passed; test_crash1 and test_crash2 each failed directly (they
+    # were in-flight when their own worker died); test_never was never
+    # reached even after the one allowed retry.
+    result.assert_outcomes(passed=1, failed=3)
+    result.stdout.fnmatch_lines(["*never reached this test even after one retry*"])
+
+
 def test_work_stealing_retries_the_never_started_remainder_of_a_crashed_chunk(pytester):
     pytester.makepyfile(
         test_mod="""
