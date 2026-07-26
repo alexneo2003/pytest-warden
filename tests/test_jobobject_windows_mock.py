@@ -35,16 +35,20 @@ def windows_jobobject_module(monkeypatch):
     fake_win32con.PROCESS_SET_QUOTA = 0x0100
     fake_win32con.PROCESS_TERMINATE = 0x0001
 
+    fake_win32process = types.ModuleType("win32process")
+    fake_win32process.TerminateProcess = MagicMock()
+
     monkeypatch.setitem(sys.modules, "win32job", fake_win32job)
     monkeypatch.setitem(sys.modules, "win32api", fake_win32api)
     monkeypatch.setitem(sys.modules, "win32con", fake_win32con)
+    monkeypatch.setitem(sys.modules, "win32process", fake_win32process)
     monkeypatch.setattr(sys, "platform", "win32")
 
     import pytest_warden.jobobject as jobobject_module
 
     importlib.reload(jobobject_module)
     try:
-        yield jobobject_module, fake_win32job, fake_win32api, fake_win32con
+        yield jobobject_module, fake_win32job, fake_win32api, fake_win32con, fake_win32process
     finally:
         # Restore the real (POSIX, on this dev machine) branch so no other
         # test in this process sees a module stuck in fake-Windows mode --
@@ -58,7 +62,7 @@ def windows_jobobject_module(monkeypatch):
 def test_windows_job_object_assign_then_terminate_calls_expected_win32_apis_in_order(
     windows_jobobject_module,
 ):
-    jobobject_module, fake_win32job, fake_win32api, _ = windows_jobobject_module
+    jobobject_module, fake_win32job, fake_win32api, _, fake_win32process = windows_jobobject_module
     job = jobobject_module.JobObject()
 
     fake_win32job.CreateJobObject.assert_called_once()
@@ -74,13 +78,22 @@ def test_windows_job_object_assign_then_terminate_calls_expected_win32_apis_in_o
 
     job.terminate()
     fake_win32job.TerminateJobObject.assert_called_once_with("job-handle", 1)
+    # Direct-process fallback: terminate() also targets the retained
+    # process handle by itself, independent of job-based tree termination.
+    fake_win32process.TerminateProcess.assert_called_once_with("proc-handle", 1)
 
     job.close()
-    fake_win32api.CloseHandle.assert_called_once_with("job-handle")
+    # Both the retained process handle and the job handle are closed now
+    # (the process handle used to be leaked -- opened in assign() and never
+    # retained or closed at all).
+    assert fake_win32api.CloseHandle.call_args_list == [
+        (("proc-handle",), {}),
+        (("job-handle",), {}),
+    ]
 
 
 def test_windows_job_object_assign_uses_least_privilege_access_rights(windows_jobobject_module):
-    jobobject_module, _, fake_win32api, fake_win32con = windows_jobobject_module
+    jobobject_module, _, fake_win32api, fake_win32con, _ = windows_jobobject_module
     job = jobobject_module.JobObject()
     job.assign(999)
 

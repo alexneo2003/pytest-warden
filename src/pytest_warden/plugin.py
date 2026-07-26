@@ -667,6 +667,7 @@ def _replay_line(session, worker, line):
 
 
 _KILL_VERIFY_TIMEOUT = 2.0
+_KILL_MAX_ATTEMPTS = 3
 
 
 def _terminate_and_verify(worker):
@@ -677,21 +678,30 @@ def _terminate_and_verify(worker):
     # TerminateJobObject without raising a Python-visible error), the
     # caller falls back to passively polling proc.poll() with no bound,
     # silently degrading into "wait for natural death" instead of a fast,
-    # loud failure. Bound the wait and retry once, warning if it still
-    # didn't take, so a genuinely-stuck kill is visible in CI output.
-    worker.job.terminate()
-    deadline = time.monotonic() + _KILL_VERIFY_TIMEOUT
-    while time.monotonic() < deadline:
+    # loud failure. Bound the wait and retry a few times, warning on every
+    # attempt that doesn't take, so a genuinely-stuck kill is visible in CI
+    # output. A single retry (confirmed against real Windows CI runs of
+    # this project's own full test suite, under the heavy concurrent
+    # process churn many simultaneous worker kills create) is sometimes not
+    # enough -- multiple attempts, each independently bounded, still adds
+    # only low-single-digit milliseconds on the happy path, since each
+    # attempt's wait loop exits on the first poll() that returns non-None.
+    for attempt in range(1, _KILL_MAX_ATTEMPTS + 1):
+        worker.job.terminate()
+        deadline = time.monotonic() + _KILL_VERIFY_TIMEOUT
+        while time.monotonic() < deadline:
+            if worker.proc.poll() is not None:
+                return
+            time.sleep(_POLL_INTERVAL)
         if worker.proc.poll() is not None:
             return
-        time.sleep(_POLL_INTERVAL)
-    if worker.proc.poll() is None:
+        retrying = attempt < _KILL_MAX_ATTEMPTS
         warnings.warn(
             f"warden: worker pid {worker.proc.pid} did not exit within "
-            f"{_KILL_VERIFY_TIMEOUT}s of termination -- retrying",
+            f"{_KILL_VERIFY_TIMEOUT}s of termination attempt {attempt}/{_KILL_MAX_ATTEMPTS}"
+            + (" -- retrying" if retrying else " -- giving up, falling back to a passive wait"),
             stacklevel=2,
         )
-        worker.job.terminate()
 
 
 def _poll_once(session, workers):

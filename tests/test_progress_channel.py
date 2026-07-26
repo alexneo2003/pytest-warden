@@ -382,10 +382,30 @@ def test_terminate_and_verify_retries_and_warns_when_the_first_kill_does_not_tak
     with pytest.warns(UserWarning, match="did not exit within"):
         _terminate_and_verify(worker)
 
-    assert job.terminate_calls == 2, (
-        f"expected one initial terminate() plus one retry after the verify "
-        f"window expired, got {job.terminate_calls} call(s)"
+    assert job.terminate_calls == 3, (
+        f"expected one terminate() call per attempt (_KILL_MAX_ATTEMPTS=3) when "
+        f"the process never reports exit, got {job.terminate_calls} call(s)"
     )
+
+
+def test_terminate_and_verify_recovers_if_only_a_later_retry_actually_takes(monkeypatch):
+    # Reproduces the exact scenario observed running this project's own
+    # full test suite on real Windows CI: under heavy concurrent process
+    # churn (many workers being killed at once), a single retry sometimes
+    # still wasn't enough for the kill to register in time -- a second
+    # retry was needed before the process actually died.
+    monkeypatch.setattr("pytest_warden.plugin._KILL_VERIFY_TIMEOUT", 0.05)
+    monkeypatch.setattr("pytest_warden.plugin._POLL_INTERVAL", 0.01)
+
+    job = _StuckJob()
+    proc = _StuckProc(dies_after_n_terminates=3)  # only the 3rd attempt's terminate() takes
+    proc.job = job
+    worker = types.SimpleNamespace(job=job, proc=proc)
+
+    with pytest.warns(UserWarning, match="did not exit within"):
+        _terminate_and_verify(worker)
+
+    assert job.terminate_calls == 3
 
 
 def test_terminate_and_verify_does_not_warn_or_retry_once_the_process_actually_exits(

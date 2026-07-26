@@ -86,11 +86,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `JobObject` now retains the process handle and also calls
   `TerminateProcess` on it directly as a fallback, and the controller now
   verifies the kill actually took effect within a short bounded window,
-  retrying once and emitting a `UserWarning` if it still hasn't. Found via
-  real Windows CI: a `--timeout=1` hanging test took over 30s (the full
-  sleep duration) to fail instead of the expected ~1s, and its fixture
-  teardown finalizer visibly ran -- proof the process was never actually
-  killed, since a true hard kill cannot run teardown code.
+  retrying (up to `_KILL_MAX_ATTEMPTS`, currently 3) and emitting a
+  `UserWarning` on every attempt that doesn't take. Found via real Windows
+  CI: a `--timeout=1` hanging test took over 30s (the full sleep duration)
+  to fail instead of the expected ~1s, and its fixture teardown finalizer
+  visibly ran -- proof the process was never actually killed, since a true
+  hard kill cannot run teardown code. A single retry was initially not
+  enough under the heavy concurrent process churn of this project's own
+  full test suite (many workers being killed at once); widened to multiple
+  bounded attempts after observing that directly on real Windows CI.
 
 ## [0.1.0]
 
