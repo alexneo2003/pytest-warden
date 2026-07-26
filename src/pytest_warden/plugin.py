@@ -210,7 +210,9 @@ def _marker_timeout_seconds(item):
     if marker is None:
         return None
     if not marker.args:
-        raise pytest.UsageError(f"{item.nodeid}: @pytest.mark.timeout(...) requires a seconds argument")
+        raise pytest.UsageError(
+            f"{item.nodeid}: @pytest.mark.timeout(...) requires a seconds argument"
+        )
     value = float(marker.args[0])
     if value <= 0:
         raise pytest.UsageError(
@@ -499,7 +501,9 @@ def _run_controller(session):
     # _replay_event on each logstart so _poll_once measures the CURRENTLY
     # in-flight test's own budget, not a single constant for the whole worker.
     session.config._warden_test_timeouts = {
-        item.nodeid: timeout if (marker_seconds := _marker_timeout_seconds(item)) is None else marker_seconds
+        item.nodeid: timeout
+        if (marker_seconds := _marker_timeout_seconds(item)) is None
+        else marker_seconds
         for item in session.items
     }
 
@@ -854,7 +858,9 @@ def _poll_once(session, workers):
                 # THAT test's own budget (its @pytest.mark.timeout override,
                 # or the --timeout default), not a stale one left over from
                 # whatever was running before these lines arrived.
-                effective_timeout = worker.current_timeout if worker.current is not None else worker.timeout
+                effective_timeout = (
+                    worker.current_timeout if worker.current is not None else worker.timeout
+                )
                 if effective_timeout:
                     worker.deadline = now + effective_timeout
 

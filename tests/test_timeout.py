@@ -165,7 +165,9 @@ def test_pytest_mark_timeout_overrides_the_global_default_for_that_test_only(pyt
     result = pytester.runpytest("--warden", "--numprocesses=1")
     elapsed = time.monotonic() - start
 
-    assert elapsed < 15, f"took {elapsed}s, should have been hard-killed near the marker's 1s timeout"
+    assert elapsed < 15, (
+        f"took {elapsed}s, should have been hard-killed near the marker's 1s timeout"
+    )
     result.assert_outcomes(failed=1, passed=1)
     result.stdout.fnmatch_lines(["*hard-killed*1.0s timeout*"])
     result.stdout.no_fnmatch_line("*PytestUnknownMarkWarning*")
