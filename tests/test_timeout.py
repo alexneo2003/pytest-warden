@@ -102,6 +102,17 @@ def test_hard_kill_of_one_worker_does_not_affect_a_sibling_worker(pytester):
     result.assert_outcomes(failed=1, passed=1)
 
 
+def test_many_trivial_tests_on_one_fast_worker_are_all_accounted_for(pytester):
+    # Stresses races on fast start/finish: many tests complete within a
+    # single _POLL_INTERVAL (50ms), so _read_new_lines must correctly pick
+    # up ALL buffered lines from one poll rather than losing or
+    # misordering any.
+    body = "\n".join(f"def test_{i}():\n    pass\n" for i in range(60))
+    pytester.makepyfile(body)
+    result = pytester.runpytest("--warden", "--numprocesses=1")
+    result.assert_outcomes(passed=60)
+
+
 def test_no_duplicate_report_for_a_hard_killed_test(pytester):
     pytester.makepyfile(
         """

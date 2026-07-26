@@ -1,9 +1,11 @@
 import subprocess
 import time
+import types
 
 from conftest import process_exists
 
 from pytest_warden.jobobject import JobObject
+from pytest_warden.plugin import _read_new_lines
 
 
 def test_terminate_kills_a_running_process():
@@ -63,3 +65,29 @@ def test_terminate_kills_a_child_process_spawned_by_the_worker():
 
     time.sleep(0.2)
     assert not process_exists(child_pid)
+
+
+def test_progress_lines_round_trip_correctly_regardless_of_platform_newline_translation(tmp_path):
+    # worker.py's _write and plugin.py's _read_new_lines both open the
+    # progress file in default text mode (no `newline=` override), which
+    # means Python's own universal-newline translation applies on both
+    # ends: on write, "\n" becomes os.linesep (== "\r\n" on Windows); on
+    # read, any of "\r\n"/"\r"/"\n" is normalized back to "\n". This
+    # simulates the Windows write path directly (writing "\r\n" bytes) to
+    # confirm the read side still normalizes correctly and the
+    # line.endswith("\n") completeness check still passes, without needing
+    # an actual Windows machine.
+    progress_path = tmp_path / "worker-0.jsonl"
+    with open(progress_path, "wb") as fh:
+        fh.write(b'{"kind": "logstart", "nodeid": "test_a"}\r\n')
+        fh.write(b'{"kind": "logfinish", "nodeid": "test_a"}\r\n')
+
+    worker = types.SimpleNamespace(progress_path=str(progress_path), lines_consumed=0)
+    lines = _read_new_lines(worker)
+
+    assert len(lines) == 2
+    assert all("\r" not in line for line in lines), f"embedded \\r survived normalization: {lines}"
+    import json
+
+    assert json.loads(lines[0])["nodeid"] == "test_a"
+    assert worker.lines_consumed == 2
