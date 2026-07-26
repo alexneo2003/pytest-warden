@@ -82,7 +82,7 @@ def test_progress_lines_round_trip_correctly_regardless_of_platform_newline_tran
         fh.write(b'{"kind": "logstart", "nodeid": "test_a"}\r\n')
         fh.write(b'{"kind": "logfinish", "nodeid": "test_a"}\r\n')
 
-    worker = types.SimpleNamespace(progress_path=str(progress_path), lines_consumed=0)
+    worker = types.SimpleNamespace(progress_path=str(progress_path), byte_offset=0)
     lines = _read_new_lines(worker)
 
     assert len(lines) == 2
@@ -90,4 +90,5 @@ def test_progress_lines_round_trip_correctly_regardless_of_platform_newline_tran
     import json
 
     assert json.loads(lines[0])["nodeid"] == "test_a"
-    assert worker.lines_consumed == 2
+    assert worker.byte_offset > 0
+    assert _read_new_lines(worker) == [], "should be fully consumed -- no duplicate re-read"

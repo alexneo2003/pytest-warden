@@ -10,27 +10,18 @@ import time
 from pytest_warden.plugin import _read_new_lines
 
 
-def test_read_new_lines_currently_rereads_the_whole_file_every_call_documents_current_behavior():
-    # _read_new_lines has no seek()-based resume -- it calls fh.readlines()
-    # on the ENTIRE progress file every poll (every _POLL_INTERVAL, for the
-    # life of the worker), then slices to only the new lines. For a worker
-    # with a long progress history this is a real, moderate-priority
-    # inefficiency (each poll re-reads and re-decodes bytes it already
-    # consumed), but switching to byte-offset/seek()-based incremental
-    # reads is a genuine behavior change to a correctness-verified, central
-    # code path -- NOT fixed in this pass; surfaced as a documented
-    # follow-up recommendation instead, consistent with area 12 being
-    # explicitly lowest-priority. This test pins down the CURRENT
-    # implementation choice as a source-level fact so a future change is a
-    # deliberate, visible decision rather than an accidental behavior
-    # change nobody notices.
+def test_read_new_lines_uses_seek_based_incremental_reads_not_full_reread():
+    # _read_new_lines resumes from worker.byte_offset (a fh.tell() cookie)
+    # instead of re-reading the whole progress file with fh.readlines()
+    # every poll -- this pins the CURRENT implementation choice as a
+    # source-level fact, inverted from the prior audit pass's pin test
+    # (which documented the OLD full-reread behavior as a deliberately
+    # unfixed finding). See tests/test_progress_channel.py for the
+    # torn-write/multibyte-UTF-8 correctness proofs that motivated the
+    # specific seek()/tell()-only design.
     source = inspect.getsource(_read_new_lines)
-    assert "readlines()" in source
-    assert "seek(" not in source, (
-        "looks like _read_new_lines now uses seek()-based incremental reads -- "
-        "the O(total-lines-so-far) per-poll re-read finding this test documents "
-        "has apparently been fixed; update README/this test accordingly"
-    )
+    assert "readlines()" not in source
+    assert "seek(" in source
 
 
 def test_no_pathological_sleep_beyond_the_documented_poll_interval(pytester):

@@ -37,6 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--numprocesses`: now rejects 0/negative/unparseable values with a
   `pytest.UsageError` instead of silently clamping to 1, matching
   `--timeout`/`--warden-chunk-size`'s existing validation convention.
+- `_read_new_lines`: resumes from a saved `seek()`/`tell()`-derived byte
+  offset instead of re-reading a worker's entire progress file from byte
+  0 on every poll, without changing the torn-write safety guarantee (an
+  incomplete, non-newline-terminated line is never returned until
+  complete).
+
+### Fixed
+
+- A warden controller running nested inside an outer warden worker (this
+  project's own self-hosted dogfood run does this) no longer inherits
+  `PYTEST_WARDEN_WORKER=1` from the outer invocation's environment, which
+  previously caused a `conftest.py` self-guard hookimpl to incorrectly
+  suppress the inner controller's own report replay.
 
 ## [0.1.0]
 

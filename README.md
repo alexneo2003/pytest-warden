@@ -230,11 +230,3 @@ UI Mode (a live web dashboard) is the remaining unplanned item — everything
 else from the original phased plan is implemented. See
 `docs/superpowers/plans/` for implementation notes on rerun workflows and
 work-stealing.
-
-Known follow-up (not yet done): `_read_new_lines` re-reads a worker's
-entire progress file from byte 0 on every poll instead of resuming from a
-saved byte offset — correct, but for a worker with a long progress history
-it's a real, moderate-priority inefficiency (see
-`tests/test_overhead.py`). Left as-is deliberately rather than bundled into
-an unrelated pass, since it touches the most central shared function in the
-controller.

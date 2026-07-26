@@ -366,7 +366,7 @@ class _Worker:
         self.batch = batch
         self.cov_data_file = cov_data_file
         self.is_retry = is_retry
-        self.lines_consumed = 0
+        self.byte_offset = 0
         self.deadline = time.monotonic() + timeout if timeout else None
         self.killed = False
         self.started_ids = set()
@@ -704,12 +704,30 @@ def _supervise(session, workers):
 
 
 def _read_new_lines(worker):
+    # Resumes from worker.byte_offset instead of re-reading the whole file
+    # from byte 0 every poll. worker.byte_offset is ONLY ever assigned from
+    # this file object's own fh.tell(), called right after readline()
+    # returns a confirmed-complete ("\n"-terminated) line -- never from
+    # manual arithmetic (offset + len(line)), which is undefined once
+    # CRLF-translation/multi-byte UTF-8 is involved for a text-mode file.
+    # A torn/partial write (readline() returns a string NOT ending in
+    # "\n", including "" at EOF) simply breaks the loop before its content
+    # is ever appended or its position committed -- identical torn-write
+    # safety to the previous line.endswith("\n") filter, applied
+    # incrementally. Seeking past a truncated file's new EOF is legal and
+    # readline() just returns "", so no special-casing is needed there
+    # either.
+    complete = []
     with open(worker.progress_path, encoding="utf-8") as fh:
-        all_lines = fh.readlines()
-    complete = [line for line in all_lines if line.endswith("\n")]
-    new = complete[worker.lines_consumed :]
-    worker.lines_consumed = len(complete)
-    return [line.strip() for line in new]
+        if worker.byte_offset:
+            fh.seek(worker.byte_offset)
+        while True:
+            line = fh.readline()
+            if not line.endswith("\n"):
+                break
+            complete.append(line.strip())
+            worker.byte_offset = fh.tell()
+    return complete
 
 
 def _replay_event(session, worker, event):

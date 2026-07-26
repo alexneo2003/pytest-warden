@@ -9,6 +9,7 @@ at a specific instant isn't a stable, non-flaky thing to engineer via
 subprocess timing.
 """
 
+import json
 import types
 
 import pytest
@@ -142,9 +143,9 @@ def test_truncated_progress_file_between_polls_does_not_crash(rig):
     )
     first = _read_new_lines(rig.worker)
     assert len(first) == 2
-    assert rig.worker.lines_consumed == 2
+    assert rig.worker.byte_offset > 0
 
-    # Simulate truncation: the file is now shorter than lines_consumed implies.
+    # Simulate truncation: the file is now shorter than byte_offset implies.
     rig.progress_path.write_text("", encoding="utf-8")
     second = _read_new_lines(rig.worker)
     assert second == []
@@ -170,3 +171,36 @@ def test_logfinish_without_a_prior_logstart_does_not_raise(rig):
     )
     _poll_once(rig.session, [rig.worker])
     assert rig.worker.current is None
+
+
+def test_torn_line_without_trailing_newline_is_not_returned_until_completed(rig):
+    # The essential correctness property of the byte-offset rewrite: a
+    # partially-written line (no trailing "\n" yet) must not be returned,
+    # and byte_offset must not advance past it, so the SAME bytes are
+    # re-read (this time complete) on a later poll.
+    with open(rig.progress_path, "a", encoding="utf-8") as fh:
+        fh.write('{"kind": "logstart", "nodeid": "test_a"')  # no trailing \n
+
+    first = _read_new_lines(rig.worker)
+    assert first == []
+    assert rig.worker.byte_offset == 0
+
+    with open(rig.progress_path, "a", encoding="utf-8") as fh:
+        fh.write(', "location": ["m.py", 0, "test_a"]}\n')
+
+    second = _read_new_lines(rig.worker)
+    assert len(second) == 1
+    assert json.loads(second[0])["nodeid"] == "test_a"
+
+
+def test_read_new_lines_handles_multibyte_utf8_nodeid_without_corrupting_the_offset(rig):
+    # A manually-arithmetic byte offset (offset + len(str)) would silently
+    # desync from a real seek()/tell() cookie the moment a multi-byte UTF-8
+    # character is involved -- this pins that the implementation doesn't do
+    # that, by proving full, correct consumption with no desync/duplicate.
+    _write_lines(rig.progress_path, ['{"kind": "logstart", "nodeid": "test_ééé"}'])
+    first = _read_new_lines(rig.worker)
+    assert len(first) == 1
+    assert json.loads(first[0])["nodeid"] == "test_ééé"
+    second = _read_new_lines(rig.worker)
+    assert second == []
