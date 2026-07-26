@@ -43,3 +43,77 @@ def test_no_orphaned_process_survives_the_hard_kill(pytester):
 
     time.sleep(0.3)
     assert not process_exists(child_pid)
+
+
+def test_hard_kill_reaches_a_grandchild_process(pytester):
+    # The process-group kill (POSIX) / Job Object kill (Windows) targets
+    # the whole tree by group/job membership, not a snapshot of direct
+    # children -- a grandchild (child-of-child) inherits membership the
+    # same way a direct child does, so it must die too.
+    pytester.makepyfile(
+        """
+        import subprocess
+        import time
+
+        def test_hangs_with_a_grandchild_process():
+            # child prints its own child's (the grandchild's) pid, then hangs
+            child = subprocess.Popen(
+                [
+                    "python3",
+                    "-c",
+                    "import subprocess, time\\n"
+                    "gc = subprocess.Popen(['sleep', '30'])\\n"
+                    "print(gc.pid, flush=True)\\n"
+                    "time.sleep(30)\\n",
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            grandchild_pid = int(child.stdout.readline().strip())
+            with open("grandchild.pid", "w") as fh:
+                fh.write(str(grandchild_pid))
+            time.sleep(30)
+        """
+    )
+    result = pytester.runpytest("--warden", "--timeout=2")
+    result.assert_outcomes(failed=1)
+
+    pid_file = pytester.path / "grandchild.pid"
+    assert pid_file.exists(), "test should have written the grandchild pid before being killed"
+    grandchild_pid = int(pid_file.read_text().strip())
+
+    time.sleep(0.3)
+    assert not process_exists(grandchild_pid)
+
+
+def test_hard_kill_of_one_worker_does_not_affect_a_sibling_worker(pytester):
+    pytester.makepyfile(
+        """
+        import time
+
+        def test_hangs():
+            time.sleep(30)
+
+        def test_passes_quickly():
+            time.sleep(0.1)
+        """
+    )
+    result = pytester.runpytest("--warden", "--timeout=1", "--numprocesses=2")
+    result.assert_outcomes(failed=1, passed=1)
+
+
+def test_no_duplicate_report_for_a_hard_killed_test(pytester):
+    pytester.makepyfile(
+        """
+        import time
+
+        def test_hangs():
+            time.sleep(30)
+        """
+    )
+    result = pytester.runpytest("--warden", "--timeout=1")
+    result.assert_outcomes(failed=1)
+    stdout = result.stdout.str()
+    assert stdout.count("hard-killed") == 1, (
+        f"expected exactly one hard-kill report, got {stdout.count('hard-killed')}:\n{stdout}"
+    )
