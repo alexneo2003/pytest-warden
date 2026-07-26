@@ -1,7 +1,6 @@
-import os
 import time
 
-import pytest
+from conftest import process_exists
 
 
 def test_hanging_test_is_hard_killed_after_timeout(pytester):
@@ -43,5 +42,4 @@ def test_no_orphaned_process_survives_the_hard_kill(pytester):
     child_pid = int(pid_file.read_text().strip())
 
     time.sleep(0.3)
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    assert not process_exists(child_pid)

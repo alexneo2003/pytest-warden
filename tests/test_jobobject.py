@@ -1,8 +1,7 @@
-import os
 import subprocess
 import time
 
-import pytest
+from conftest import process_exists
 
 from pytest_warden.jobobject import JobObject
 
@@ -44,5 +43,4 @@ def test_terminate_kills_a_child_process_spawned_by_the_worker():
     proc.wait(timeout=5)
 
     time.sleep(0.2)
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    assert not process_exists(child_pid)
