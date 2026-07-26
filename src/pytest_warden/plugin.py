@@ -1,3 +1,4 @@
+import contextlib
 import json
 import math
 import os
@@ -17,6 +18,14 @@ from pytest_warden.jobobject import JobObject
 _POLL_INTERVAL = 0.05
 _HISTORY_WINDOW = 20
 _DEFAULT_WEIGHT = 1.0
+
+# Every _Worker spawned by the current _run_controller call, so a
+# KeyboardInterrupt (or any other exception) reaching _run_controller can
+# hard-kill every still-running worker before propagating -- workers run in
+# their own process group specifically so a hung one can be killed without
+# touching the controller, but that same isolation means Ctrl-C on the
+# controller doesn't reach them either unless something does this explicitly.
+_ACTIVE_WORKERS = []
 
 
 def pytest_addoption(parser):
@@ -249,6 +258,16 @@ class _Worker:
         self.killed = False
         self.started_ids = set()
         self.current = None  # {"nodeid":..., "location":...} of the in-flight test
+        _ACTIVE_WORKERS.append(self)
+
+
+def _terminate_all(workers):
+    for worker in workers:
+        with contextlib.suppress(Exception):
+            worker.job.terminate()
+    for worker in workers:
+        with contextlib.suppress(Exception):
+            worker.proc.wait(timeout=5)
 
 
 def _run_controller(session):
@@ -260,18 +279,27 @@ def _run_controller(session):
     timeout = session.config.getoption("warden_timeout")
     work_stealing = session.config.getoption("warden_work_stealing")
 
+    _ACTIVE_WORKERS.clear()
     history_store = HistoryStore(_history_db_path(session))
     session.config._warden_history_store = history_store
     try:
         with tempfile.TemporaryDirectory(prefix="pytest-warden-") as tmpdir:
-            if work_stealing:
-                worker_count, all_workers = _run_work_stealing(
-                    session, tmpdir, node_ids, numprocesses, timeout, history_store
-                )
-            else:
-                worker_count, all_workers = _run_static_lpt(
-                    session, tmpdir, node_ids, numprocesses, timeout, history_store
-                )
+            try:
+                if work_stealing:
+                    worker_count, all_workers = _run_work_stealing(
+                        session, tmpdir, node_ids, numprocesses, timeout, history_store
+                    )
+                else:
+                    worker_count, all_workers = _run_static_lpt(
+                        session, tmpdir, node_ids, numprocesses, timeout, history_store
+                    )
+            except BaseException:
+                # Covers KeyboardInterrupt too (not an Exception subclass) --
+                # without this, Ctrl-C on the controller orphans every
+                # still-running worker instead of killing them, since they
+                # live in their own process group.
+                _terminate_all(_ACTIVE_WORKERS)
+                raise
 
             session.config._warden_worker_count = worker_count
             _combine_coverage(session, all_workers)

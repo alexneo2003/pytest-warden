@@ -1,5 +1,56 @@
+import os
+import signal
+import subprocess
+import sys
+import time
+
+import pytest
+
 from pytest_warden.history import HistoryStore
 from pytest_warden.plugin import _max_concurrent_slots
+
+
+def test_sigint_terminates_the_running_worker_instead_of_orphaning_it(pytester):
+    # Workers run in their own process group (start_new_session=True) so a
+    # hard-kill of one worker can never touch the controller or its
+    # siblings -- but that same isolation means Ctrl-C on the controller
+    # doesn't propagate to a worker either, unless the controller
+    # explicitly terminates its own tracked workers on interrupt. This
+    # needs a REAL separate OS process to receive a REAL signal --
+    # pytester's in-process runpytest can't exercise this at all.
+    pytester.makepyfile(
+        test_mod="""
+        import os
+        import time
+
+        def test_hangs():
+            with open("worker.pid", "w") as fh:
+                fh.write(str(os.getpid()))
+            time.sleep(30)
+        """
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "--warden", "--numprocesses=1"],
+        cwd=str(pytester.path),
+    )
+    try:
+        pid_file = pytester.path / "worker.pid"
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pid_file.exists(), "worker never started"
+        worker_pid = int(pid_file.read_text().strip())
+
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=10)
+
+        time.sleep(0.3)
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
 
 def test_max_concurrent_slots_uses_numprocesses_not_initial_chunk_count():
