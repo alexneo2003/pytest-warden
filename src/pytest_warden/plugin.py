@@ -95,6 +95,21 @@ def pytest_addoption(parser):
         "divided across roughly 4 chunks per worker).",
     )
     group.addoption(
+        "--warden-dist",
+        dest="warden_dist",
+        action="store",
+        choices=["test", "loadfile", "loadscope", "loadgroup"],
+        default="test",
+        help="Which tests must land on the same worker subprocess together. "
+        "'test' (default): no grouping, today's per-test distribution. "
+        "'loadfile': every test in the same file. 'loadscope': every test in "
+        "the same class, or the same module for top-level functions. "
+        "'loadgroup': tests sharing @pytest.mark.warden_group(name=...); "
+        "ungrouped tests are unaffected. Orthogonal to --warden-work-stealing "
+        "(this controls WHICH tests must stay together; that controls HOW "
+        "batches/chunks get dispatched).",
+    )
+    group.addoption(
         "--warden-disable-worker-plugin",
         dest="warden_disable_worker_plugin",
         action="append",
@@ -134,6 +149,12 @@ def pytest_configure(config):
         "timeout(seconds): under --warden, hard-kill this test's whole worker "
         "subprocess if it runs longer than `seconds`, overriding --timeout for "
         "this test only. Has no effect without --warden.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "warden_group(name): under --warden --warden-dist=loadgroup, run this "
+        "test on the same worker subprocess as every other test sharing the "
+        "same group `name`. Has no effect otherwise.",
     )
     if config.getoption("warden"):
         collector = _HistoryCollector()
@@ -184,26 +205,42 @@ def _history_db_path(session):
     return str(session.config.rootpath / ".pytest_warden" / "history.sqlite3")
 
 
-def _lpt_batch(node_ids, numprocesses, history_store, previously_failed=frozenset()):
-    n = max(1, min(numprocesses, len(node_ids)))
+def _group_node_ids(node_ids, group_key_fn):
+    groups = {}
+    for node_id in node_ids:
+        groups.setdefault(group_key_fn(node_id), []).append(node_id)
+    return groups
+
+
+def _lpt_batch(
+    node_ids, numprocesses, history_store, previously_failed=frozenset(), group_key_fn=None
+):
+    group_key_fn = group_key_fn or (lambda node_id: node_id)
     weights = {}
     for node_id in node_ids:
         durations = history_store.get_durations(node_id, window=_HISTORY_WINDOW)
         weights[node_id] = statistics.median(durations) if durations else _DEFAULT_WEIGHT
 
-    def sort_key(node_id):
-        # Previously-failed tests sort first (True > False), then by weight
-        # descending within each group -- preserves --failed-first's intent
-        # without giving up load-balancing among the rest.
-        return (node_id in previously_failed, weights[node_id])
+    groups = _group_node_ids(node_ids, group_key_fn)
+    group_weight = {key: sum(weights[nid] for nid in members) for key, members in groups.items()}
+    group_failed = {
+        key: any(nid in previously_failed for nid in members) for key, members in groups.items()
+    }
+    n = max(1, min(numprocesses, len(groups)))
 
-    order = sorted(node_ids, key=sort_key, reverse=True)
+    def sort_key(key):
+        # Groups containing a previously-failed test sort first (True > False),
+        # then by total weight descending within each group -- preserves
+        # --failed-first's intent without giving up load-balancing among the rest.
+        return (group_failed[key], group_weight[key])
+
+    order = sorted(groups, key=sort_key, reverse=True)
     loads = [0.0] * n
     batches = [[] for _ in range(n)]
-    for node_id in order:
+    for key in order:
         i = min(range(n), key=lambda k: loads[k])
-        batches[i].append(node_id)
-        loads[i] += weights[node_id]
+        batches[i].extend(groups[key])
+        loads[i] += group_weight[key]
     return [batch for batch in batches if batch]
 
 
@@ -221,6 +258,25 @@ def _marker_timeout_seconds(item):
             f"{item.nodeid}: @pytest.mark.timeout seconds must be positive, got {value}"
         )
     return value
+
+
+def _group_key(item, dist_mode):
+    nodeid = item.nodeid
+    if dist_mode == "loadfile":
+        return nodeid.split("::", 1)[0]
+    if dist_mode == "loadscope":
+        return nodeid.rsplit("::", 1)[0]
+    if dist_mode == "loadgroup":
+        marker = item.get_closest_marker("warden_group")
+        if marker is not None:
+            name = marker.kwargs.get("name") or (marker.args[0] if marker.args else None)
+            if not name:
+                raise pytest.UsageError(
+                    f"{nodeid}: @pytest.mark.warden_group(...) requires a name argument"
+                )
+            # NUL-prefixed so a group name can never collide with a real nodeid.
+            return f"\0{name}"
+    return nodeid
 
 
 def _available_cpu_count():
@@ -286,21 +342,43 @@ def _default_chunk_size(total, numprocesses):
     return max(1, math.ceil(total / (n * 4)))
 
 
-def _chunk_queue(node_ids, history_store, chunk_size, previously_failed=frozenset()):
+def _chunk_queue(
+    node_ids, history_store, chunk_size, previously_failed=frozenset(), group_key_fn=None
+):
+    group_key_fn = group_key_fn or (lambda node_id: node_id)
     weights = {}
     for node_id in node_ids:
         durations = history_store.get_durations(node_id, window=_HISTORY_WINDOW)
         weights[node_id] = statistics.median(durations) if durations else _DEFAULT_WEIGHT
 
-    def sort_key(node_id):
-        # Same priority rule as _lpt_batch: previously-failed tests sort
-        # first, then by weight -- work-stealing must not lose
-        # --failed-first's intent just because it uses a different
-        # batching function than static mode does.
-        return (node_id in previously_failed, weights[node_id])
+    groups = _group_node_ids(node_ids, group_key_fn)
+    group_weight = {key: sum(weights[nid] for nid in members) for key, members in groups.items()}
+    group_failed = {
+        key: any(nid in previously_failed for nid in members) for key, members in groups.items()
+    }
 
-    order = sorted(node_ids, key=sort_key, reverse=True)
-    return [order[i : i + chunk_size] for i in range(0, len(order), chunk_size)]
+    def sort_key(key):
+        # Same priority rule as _lpt_batch: groups containing a
+        # previously-failed test sort first, then by total weight --
+        # work-stealing must not lose --failed-first's intent just because
+        # it uses a different batching function than static mode does.
+        return (group_failed[key], group_weight[key])
+
+    order = sorted(groups, key=sort_key, reverse=True)
+    chunks = []
+    current = []
+    for key in order:
+        members = groups[key]
+        # A single oversized group still becomes its own one chunk rather
+        # than being split -- only flush when there's already something in
+        # `current` to flush.
+        if current and len(current) + len(members) > chunk_size:
+            chunks.append(current)
+            current = []
+        current.extend(members)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 @dataclass
@@ -516,6 +594,12 @@ def _run_controller(session):
         raise pytest.UsageError(f"--timeout must be a positive number, got {timeout}")
     work_stealing = session.config.getoption("warden_work_stealing")
 
+    # Precomputed once against real Item objects (only session.items has
+    # markers/collection info) so downstream batching only ever deals with
+    # plain nodeid strings, same shape as _warden_test_timeouts below.
+    dist_mode = session.config.getoption("warden_dist")
+    group_keys = {item.nodeid: _group_key(item, dist_mode) for item in session.items}
+
     # Per-test override: a test marked @pytest.mark.timeout(N) gets N as its
     # own deadline budget instead of the --timeout default -- looked up by
     # _replay_event on each logstart so _poll_once measures the CURRENTLY
@@ -548,11 +632,23 @@ def _run_controller(session):
             try:
                 if work_stealing:
                     worker_count, all_workers = _run_work_stealing(
-                        session, tmpdir, node_ids, numprocesses, timeout, history_store
+                        session,
+                        tmpdir,
+                        node_ids,
+                        numprocesses,
+                        timeout,
+                        history_store,
+                        group_keys.get,
                     )
                 else:
                     worker_count, all_workers = _run_static_lpt(
-                        session, tmpdir, node_ids, numprocesses, timeout, history_store
+                        session,
+                        tmpdir,
+                        node_ids,
+                        numprocesses,
+                        timeout,
+                        history_store,
+                        group_keys.get,
                     )
             except BaseException:
                 # Covers KeyboardInterrupt too (not an Exception subclass) --
@@ -569,9 +665,9 @@ def _run_controller(session):
         history_store.close()
 
 
-def _run_static_lpt(session, tmpdir, node_ids, numprocesses, timeout, history_store):
+def _run_static_lpt(session, tmpdir, node_ids, numprocesses, timeout, history_store, group_key_fn):
     previously_failed = frozenset(session.config.cache.get("cache/lastfailed", {}))
-    batches = _lpt_batch(node_ids, numprocesses, history_store, previously_failed)
+    batches = _lpt_batch(node_ids, numprocesses, history_store, previously_failed, group_key_fn)
 
     worker_count = 0
     all_workers = []
@@ -619,7 +715,9 @@ def _max_concurrent_slots(numprocesses, total_tests):
     return max(1, min(numprocesses, total_tests))
 
 
-def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history_store):
+def _run_work_stealing(
+    session, tmpdir, node_ids, numprocesses, timeout, history_store, group_key_fn
+):
     chunk_size = session.config.getoption("warden_chunk_size")
     if chunk_size is None:
         chunk_size = _default_chunk_size(len(node_ids), numprocesses)
@@ -637,7 +735,9 @@ def _run_work_stealing(session, tmpdir, node_ids, numprocesses, timeout, history
     # entry every time and retried forever instead of stopping after one.
     queue = [
         (chunk, False)
-        for chunk in _chunk_queue(node_ids, history_store, chunk_size, previously_failed)
+        for chunk in _chunk_queue(
+            node_ids, history_store, chunk_size, previously_failed, group_key_fn
+        )
     ]
     n = _max_concurrent_slots(numprocesses, len(node_ids))
 

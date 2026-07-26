@@ -57,6 +57,7 @@ pytest --warden --numprocesses=4 --timeout=60
 | `--last-failed` / `--failed-first` | Standard pytest flags — work transparently, since warden never touches collection or pytest's own report hooks.                               |
 | `--warden-work-stealing`           | Use dynamic chunk-based scheduling instead of static LPT batching — workers that finish early pull more work instead of idling.               |
 | `--warden-chunk-size`              | Chunk size for `--warden-work-stealing` (default: ~4 chunks per worker).                                                                      |
+| `--warden-dist`                    | Which tests must land on the same worker together: `test` (default, no grouping), `loadfile`, `loadscope`, or `loadgroup` (with `@pytest.mark.warden_group(name=...)`). Orthogonal to `--warden-work-stealing`. |
 
 ### Terminal output
 
@@ -219,9 +220,21 @@ never loop a run forever.
   not once for the whole run.** Each worker is a fully separate `pytest`
   subprocess, so a `session`- or `module`-scoped fixture's state is created
   independently in every worker that ends up running part of that module —
-  the same trade-off `pytest-xdist` has. If a fixture's setup must run
-  exactly once across an entire warden invocation (not once per worker),
-  use the **`warden_run_once`** fixture:
+  the same trade-off `pytest-xdist` has. Two different fixes for two
+  different problems:
+  - If tests sharing a `module`/`class`-scoped fixture (or an arbitrary
+    marked group of tests) just need to stay **consistent with each
+    other** — not run the fixture's setup exactly once globally, just
+    never split them across workers — `--warden-dist=loadscope` (or
+    `loadfile` for whole-file grouping, or `loadgroup` with
+    `@pytest.mark.warden_group(name=...)` for cross-file grouping) is
+    usually simpler than wrapping the fixture itself. It does **not** help
+    a `session`-scoped fixture, though — grouping still spreads work
+    across multiple workers, it just keeps each named group whole within
+    one of them.
+  - If a fixture's setup must run **exactly once across the entire run**
+    (including `session` scope), regardless of how many workers touch it,
+    use the **`warden_run_once`** fixture instead:
   ```python
   @pytest.fixture(scope="session")
   def my_fixture(warden_run_once):
@@ -233,6 +246,11 @@ never loop a run forever.
   (non-`--warden`) runs too, with zero contention. See
   `pytest_warden.coordination.run_once` for the underlying primitive if
   you need it outside a fixture.
+- **`--warden-dist` grouping is a best-effort scheduling hint, not a hard
+  guarantee under failure.** It's honored on a group's initial dispatch to
+  a worker; if that worker is hard-killed mid-group (timeout, crash,
+  `--maxfail`), the surviving remainder of the group is retried as its own,
+  now-ungrouped batch rather than being re-grouped.
 - **Reach for `--warden-work-stealing` only once plain LPT batching
   demonstrably isn't enough.** It helps specifically when tests have no
   history yet, or when a test's duration varies a lot run to run, so a
