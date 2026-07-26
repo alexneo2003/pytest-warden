@@ -1,3 +1,58 @@
+from pytest_warden.history import HistoryStore
+
+
+def test_quarantining_a_failure_still_records_it_as_failed_in_history(pytester):
+    # If quarantine's outcome-rewrite (failed -> skipped/xfail) leaks into
+    # what gets recorded to history, a persistently-flaky-but-quarantined
+    # test's "failed" outcomes get silently replaced by "skipped" ones over
+    # time -- and since _is_flaky requires an actual "failed" entry in the
+    # window, the test eventually (and wrongly) stops being detected as
+    # flaky at all, purely as a side effect of having been quarantined.
+    pytester.makepyfile(
+        test_mod="""
+        import os
+
+        def test_flaky():
+            counter_file = "invocations.txt"
+            n = 0
+            if os.path.exists(counter_file):
+                n = int(open(counter_file).read())
+            n += 1
+            open(counter_file, "w").write(str(n))
+            assert n % 2 == 1
+        """
+    )
+    history_db = str(pytester.path / "history.sqlite3")
+
+    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(
+        passed=1
+    )
+    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(
+        failed=1
+    )
+    pytester.runpytest("--warden", f"--warden-history-db={history_db}").assert_outcomes(
+        passed=1
+    )
+
+    # Run 4 fails again, but this time quarantine is on -- reported as
+    # xfail, build stays green. The bug: does history record this as
+    # "skipped" (what the report became) or "failed" (what actually
+    # happened)?
+    result = pytester.runpytest(
+        "--warden", f"--warden-history-db={history_db}", "--warden-quarantine-flaky"
+    )
+    assert result.ret == 0
+
+    store = HistoryStore(history_db)
+    try:
+        outcomes = store.get_outcomes("test_mod.py::test_flaky", window=1)
+    finally:
+        store.close()
+    assert outcomes[0]["outcome"] == "failed", (
+        f"expected the quarantined run's real outcome (failed) to be recorded, got: {outcomes[0]}"
+    )
+
+
 def test_negative_chunk_size_is_rejected_instead_of_silently_running_nothing(pytester):
     pytester.makepyfile(
         """

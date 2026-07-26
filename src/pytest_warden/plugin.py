@@ -188,7 +188,7 @@ def _record_history(session, history_store):
             test_id=report.nodeid,
             project=None,
             duration=report.duration,
-            outcome=report.outcome,
+            outcome=getattr(report, "_warden_original_outcome", report.outcome),
         )
         for report in collector.reports
     ]
@@ -514,6 +514,12 @@ def _replay_event(session, worker, event):
         )
     elif kind == "logreport":
         report = hook.pytest_report_from_serializable(config=config, data=event["data"])
+        # Captured before quarantine may rewrite report.outcome (failed ->
+        # skipped/xfail) -- history must record what actually happened, not
+        # what the report was rewritten to show, or a persistently-flaky
+        # quarantined test's "failed" history entries get silently replaced
+        # by "skipped" ones over time until _is_flaky no longer sees them.
+        report._warden_original_outcome = report.outcome
         report = _maybe_quarantine(session, report)
         hook.pytest_runtest_logreport(report=report)
     elif kind == "logfinish":
