@@ -91,10 +91,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI: a `--timeout=1` hanging test took over 30s (the full sleep duration)
   to fail instead of the expected ~1s, and its fixture teardown finalizer
   visibly ran -- proof the process was never actually killed, since a true
-  hard kill cannot run teardown code. A single retry was initially not
-  enough under the heavy concurrent process churn of this project's own
-  full test suite (many workers being killed at once); widened to multiple
-  bounded attempts after observing that directly on real Windows CI.
+  hard kill cannot run teardown code. Neither `TerminateJobObject` nor
+  `TerminateProcess` ever raised an exception on real Windows CI (both
+  reported success every time), yet the process kept running regardless --
+  `JobObject.terminate()` now also runs `taskkill /F /T` by PID as a third,
+  independent fallback that doesn't depend on Job Object membership/nesting
+  at all, which is what actually made the kill take effect; confirmed on a
+  real `windows-latest` CI run (previously ~442s with the two hanging
+  tests failing, now 102s with all 134 tests passing).
 
 ## [0.1.0]
 

@@ -24,9 +24,7 @@ def windows_jobobject_module(monkeypatch):
     fake_win32job.SetInformationJobObject = MagicMock()
     fake_win32job.AssignProcessToJobObject = MagicMock()
     fake_win32job.TerminateJobObject = MagicMock()
-    fake_win32job.IsProcessInJob = MagicMock(return_value=True)
     fake_win32job.JobObjectExtendedLimitInformation = "JobObjectExtendedLimitInformation"
-    fake_win32job.JobObjectBasicProcessIdList = "JobObjectBasicProcessIdList"
     fake_win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 
     fake_win32api = types.ModuleType("win32api")
@@ -36,7 +34,6 @@ def windows_jobobject_module(monkeypatch):
     fake_win32con = types.ModuleType("win32con")
     fake_win32con.PROCESS_SET_QUOTA = 0x0100
     fake_win32con.PROCESS_TERMINATE = 0x0001
-    fake_win32con.PROCESS_QUERY_INFORMATION = 0x0400
 
     fake_win32process = types.ModuleType("win32process")
     fake_win32process.TerminateProcess = MagicMock()
@@ -50,8 +47,17 @@ def windows_jobobject_module(monkeypatch):
     import pytest_warden.jobobject as jobobject_module
 
     importlib.reload(jobobject_module)
+    fake_subprocess_run = MagicMock()
+    monkeypatch.setattr(jobobject_module.subprocess, "run", fake_subprocess_run)
     try:
-        yield jobobject_module, fake_win32job, fake_win32api, fake_win32con, fake_win32process
+        yield (
+            jobobject_module,
+            fake_win32job,
+            fake_win32api,
+            fake_win32con,
+            fake_win32process,
+            fake_subprocess_run,
+        )
     finally:
         # Restore the real (POSIX, on this dev machine) branch so no other
         # test in this process sees a module stuck in fake-Windows mode --
@@ -65,7 +71,9 @@ def windows_jobobject_module(monkeypatch):
 def test_windows_job_object_assign_then_terminate_calls_expected_win32_apis_in_order(
     windows_jobobject_module,
 ):
-    jobobject_module, fake_win32job, fake_win32api, _, fake_win32process = windows_jobobject_module
+    jobobject_module, fake_win32job, fake_win32api, _, fake_win32process, fake_subprocess_run = (
+        windows_jobobject_module
+    )
     job = jobobject_module.JobObject()
 
     fake_win32job.CreateJobObject.assert_called_once()
@@ -84,22 +92,25 @@ def test_windows_job_object_assign_then_terminate_calls_expected_win32_apis_in_o
     # Direct-process fallback: terminate() also targets the retained
     # process handle by itself, independent of job-based tree termination.
     fake_win32process.TerminateProcess.assert_called_once_with("proc-handle", 1)
+    # Third independent fallback: taskkill /F /T by PID, which doesn't
+    # depend on Job Object membership/nesting at all -- confirmed on real
+    # Windows CI to be what actually made the kill take effect when both
+    # win32 calls above reported success but the process kept running.
+    taskkill_args = fake_subprocess_run.call_args[0][0]
+    assert taskkill_args == ["taskkill", "/F", "/T", "/PID", "12345"]
 
     job.close()
     # Both the retained process handle and the job handle are closed now
     # (the process handle used to be leaked -- opened in assign() and never
-    # retained or closed at all). The extra "proc-handle" close in the
-    # middle is the TEMPORARY diagnostic query handle opened/closed inside
-    # terminate() -- remove this once the diagnostic is removed.
+    # retained or closed at all).
     assert fake_win32api.CloseHandle.call_args_list == [
-        (("proc-handle",), {}),
         (("proc-handle",), {}),
         (("job-handle",), {}),
     ]
 
 
 def test_windows_job_object_assign_uses_least_privilege_access_rights(windows_jobobject_module):
-    jobobject_module, _, fake_win32api, fake_win32con, _ = windows_jobobject_module
+    jobobject_module, _, fake_win32api, fake_win32con, _, _ = windows_jobobject_module
     job = jobobject_module.JobObject()
     job.assign(999)
 
