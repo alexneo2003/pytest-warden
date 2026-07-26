@@ -25,9 +25,17 @@ if IS_WINDOWS:
     import win32api
     import win32con
     import win32job
+    import win32process
 
     class JobObject:
         def __init__(self):
+            # An empty string, not None, is the correct pywin32 idiom for
+            # an anonymous job object here -- pywin32's CreateJobObject
+            # binding requires the name argument to be a string (raises
+            # TypeError on None), even though the underlying WinAPI accepts
+            # a NULL name pointer. Confirmed empirically on real Windows;
+            # this isn't the "needless deviation" it looks like from the
+            # WinAPI docs alone.
             self.handle = win32job.CreateJobObject(None, "")
             info = win32job.QueryInformationJobObject(
                 self.handle, win32job.JobObjectExtendedLimitInformation
@@ -38,20 +46,38 @@ if IS_WINDOWS:
             win32job.SetInformationJobObject(
                 self.handle, win32job.JobObjectExtendedLimitInformation, info
             )
+            self._proc_handle = None
 
         def assign(self, pid: int):
             # Least privilege: AssignProcessToJobObject only needs the
             # rights to set quota/limits and to terminate the process, so
             # open the worker with just those instead of PROCESS_ALL_ACCESS.
+            # The handle is retained (not just used-and-discarded) so
+            # terminate() below has a direct fallback on the worker's own
+            # PID, independent of Job Object tree termination.
             access = win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE
-            proc_handle = win32api.OpenProcess(access, False, pid)
-            win32job.AssignProcessToJobObject(self.handle, proc_handle)
+            self._proc_handle = win32api.OpenProcess(access, False, pid)
+            win32job.AssignProcessToJobObject(self.handle, self._proc_handle)
 
         def terminate(self):
-            """Hard-kills every process currently in the job."""
-            win32job.TerminateJobObject(self.handle, 1)
+            """Hard-kills every process currently in the job. Also
+            terminates the directly-assigned process by its own handle as a
+            fallback -- job-based tree termination can be blocked by an
+            ambient outer Job Object's own nesting/breakaway policy
+            (observed in practice on GitHub Actions' windows-latest
+            runners) without raising a Python-visible error, silently
+            leaving the process alive."""
+            with contextlib.suppress(Exception):
+                win32job.TerminateJobObject(self.handle, 1)
+            if self._proc_handle is not None:
+                with contextlib.suppress(Exception):
+                    win32process.TerminateProcess(self._proc_handle, 1)
 
         def close(self):
+            if self._proc_handle is not None:
+                with contextlib.suppress(Exception):
+                    win32api.CloseHandle(self._proc_handle)
+                self._proc_handle = None
             win32api.CloseHandle(self.handle)
 
 else:
