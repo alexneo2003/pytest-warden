@@ -1,0 +1,103 @@
+name: Snyk Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, offset from codeql.yml's Saturday 10:45 UTC cron so the two
+    # scans don't contend for runners at the same time.
+    - cron: "30 6 * * 1"
+  workflow_dispatch: # allow on-demand runs from the Actions tab
+
+# NOTE: concurrency groups are scoped per-repository, not per-workflow, so
+# this must use a name distinct from codeql.yml's "code-quality-*" group,
+# otherwise the two workflows would cancel each other's runs.
+concurrency:
+  group: snyk-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  snyk-open-source:
+    name: Snyk Open Source (dependencies)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      # Snyk's native uv.lock parsing is Early Access / Enterprise-only, and
+      # pointing Snyk at a uv-created venv via --command is known-broken
+      # (uv venvs have no pip importable). Exporting a flat pip-format
+      # manifest from the committed uv.lock sidesteps both issues.
+      - name: Export pip-format manifest from uv.lock
+        run: |
+          uv export \
+            --format requirements-txt \
+            --frozen \
+            --no-hashes \
+            --all-groups \
+            --no-emit-project \
+            -o requirements-snyk.txt
+
+      - name: Install Snyk CLI
+        uses: snyk/actions/setup@master
+
+      - name: Run Snyk Open Source test
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        # Non-blocking: `snyk test` exits non-zero on found vulnerabilities.
+        # continue-on-error absorbs that (report-only requirement) while
+        # still letting the SARIF upload step run afterwards.
+        continue-on-error: true
+        run: |
+          snyk test \
+            --file=requirements-snyk.txt \
+            --package-manager=pip \
+            --sarif-file-output=snyk-oss.sarif
+
+      - name: Upload Snyk Open Source SARIF to code scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: snyk-oss.sarif
+          category: snyk-open-source
+
+  snyk-code:
+    name: Snyk Code (SAST)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Snyk CLI
+        uses: snyk/actions/setup@master
+
+      - name: Run Snyk Code test
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+        run: snyk code test --sarif-file-output=snyk-code.sarif
+
+      - name: Upload Snyk Code SARIF to code scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: snyk-code.sarif
+          category: snyk-code
