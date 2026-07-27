@@ -1,5 +1,9 @@
 # pytest-warden
 
+[![CI](https://github.com/alexneo2003/pytest-warden/actions/workflows/ci.yml/badge.svg)](https://github.com/alexneo2003/pytest-warden/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/alexneo2003/pytest-warden/actions/workflows/codeql.yml/badge.svg)](https://github.com/alexneo2003/pytest-warden/actions/workflows/codeql.yml)
+[![Snyk Security Scan](https://github.com/alexneo2003/pytest-warden/actions/workflows/snyk.yml/badge.svg)](https://github.com/alexneo2003/pytest-warden/actions/workflows/snyk.yml)
+
 A pytest plugin that distributes your test run across supervised worker
 subprocesses and **guarantees** a timeout kills the whole process tree —
 the test, any browser/Node/child processes it spawned, everything — instead
