@@ -90,6 +90,21 @@ jobs:
           sarif_file: snyk-oss.sarif
           category: snyk-open-source
 
+      # `snyk monitor` snapshots the dependency tree to the Snyk dashboard
+      # (app.snyk.io) for continuous monitoring -- it never fails the build,
+      # unlike `test`. Only run on main (push/schedule/manual), not on every
+      # PR, so PR branches don't spam the dashboard with throwaway projects.
+      - name: Monitor Snyk Open Source project
+        if: github.event_name != 'pull_request'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+        run: |
+          snyk monitor \
+            --file=requirements-frozen.txt \
+            --package-manager=pip \
+            --project-name=pytest-warden
+
   snyk-code:
     name: Snyk Code (SAST)
     runs-on: ubuntu-latest
