@@ -31,6 +31,7 @@ dev = [
     "ruff>=0.8",
     "ty>=0.0.1a1",
     "pre-commit>=4",
+    "defusedxml>=0.7",
 ]
 
 [tool.ruff]
