@@ -51,15 +51,19 @@ jobs:
             --no-emit-project \
             -o requirements-snyk.txt
 
-      # Snyk's pip plugin resolves the dependency graph by inspecting
-      # actually-installed package metadata, not just the manifest text, so
-      # the exported requirements must be installed somewhere it can see
-      # them. `uv venv --seed` seeds pip/setuptools/wheel since uv-created
-      # venvs don't ship pip by default (snyk shells out to pip).
-      - name: Install dependencies for Snyk to inspect
+      # Snyk's pip plugin resolves the dependency graph from actually
+      # installed package metadata, and it treats every name listed in the
+      # given file as required regardless of PEP 508 environment markers
+      # (e.g. `; sys_platform == 'win32'`) -- packages correctly skipped on
+      # this platform still trip "Missing required packages". Installing
+      # into a seeded venv (uv-created venvs ship no pip by default, and
+      # Snyk shells out to pip) and re-freezing from *that* environment
+      # yields a marker-free, install-matching file for Snyk to scan.
+      - name: Install dependencies and freeze for Snyk to inspect
         run: |
           uv venv --seed .venv-snyk
           uv pip install --python .venv-snyk -r requirements-snyk.txt
+          uv pip freeze --python .venv-snyk > requirements-frozen.txt
           echo "$PWD/.venv-snyk/bin" >> "$GITHUB_PATH"
 
       - name: Install Snyk CLI
@@ -74,7 +78,7 @@ jobs:
         continue-on-error: true
         run: |
           snyk test \
-            --file=requirements-snyk.txt \
+            --file=requirements-frozen.txt \
             --package-manager=pip \
             --sarif-file-output=snyk-oss.sarif
 
