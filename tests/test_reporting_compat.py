@@ -1,4 +1,4 @@
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 
 
 def test_junitxml_records_a_hard_killed_test_with_a_readable_message(pytester):
