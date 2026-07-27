@@ -51,6 +51,17 @@ jobs:
             --no-emit-project \
             -o requirements-snyk.txt
 
+      # Snyk's pip plugin resolves the dependency graph by inspecting
+      # actually-installed package metadata, not just the manifest text, so
+      # the exported requirements must be installed somewhere it can see
+      # them. `uv venv --seed` seeds pip/setuptools/wheel since uv-created
+      # venvs don't ship pip by default (snyk shells out to pip).
+      - name: Install dependencies for Snyk to inspect
+        run: |
+          uv venv --seed .venv-snyk
+          uv pip install --python .venv-snyk -r requirements-snyk.txt
+          echo "$PWD/.venv-snyk/bin" >> "$GITHUB_PATH"
+
       - name: Install Snyk CLI
         uses: snyk/actions/setup@master
 
