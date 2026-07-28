@@ -31,35 +31,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warden is active.
 - `--warden-run-dir` (internal): the controller's per-invocation shared
   temp directory, forwarded to every worker subprocess.
+- `timeout` ini option (e.g. `[tool.pytest.ini_options]` in
+  `pyproject.toml`): registered via `parser.addini` and used as the
+  per-test timeout default whenever `--timeout` isn't passed on the
+  command line -- previously only the CLI flag worked, and a `timeout`
+  key in ini config produced `PytestUnknownMarkWarning`-style "Unknown
+  config option" noise under `--strict-config` instead.
+- A hard-killed worker's still-queued batch-mates are now retried one
+  scheduling group per retry batch/chunk, not re-bundled into a single
+  one. Previously, if the *first* test in a re-bundled retry batch also
+  hung, every other stranded test in that batch got silently reported as
+  "never reached this test" instead of getting its own real retry
+  attempt -- splitting stranded ids by group (a lone nodeid, unless
+  `--warden-dist=loadgroup` groups tests that must share a process) gives
+  every stranded test/group an isolated retry worker by default.
 - Live terminal reporting: a run previously stayed completely silent until
   the final summary line, giving no sign of how many workers were in play
   or what they were doing. `--warden` now prints a one-line startup banner
-  (worker count and scheduling mode) before dispatch begins, shown by
-  default and suppressed under `-v`/`-vv` (see below); a
-  `[done/total] worker N -> nodeid RESULT` line as each test finishes
+  (worker count and scheduling mode) before dispatch begins; a
+  `[n/total] worker N -> nodeid STARTED` line the moment a worker picks up
+  a test and a `[n/total] worker N -> nodeid RESULT` line once it finishes
   (`RESULT` being pytest's own PASSED/FAILED/SKIPPED/XFAIL/... word, via
   the same `pytest_report_teststatus` hook the builtin terminal reporter
-  itself uses), likewise shown by default (this is the only place a bare,
-  non-`-v` run learns which test ran on which worker and how it came out)
-  and suppressed under `-v`/`-vv` (pytest's own verbose reporter already
-  prints that same nodeid plus outcome on its own line, so ours would
-  just repeat it) and under `-q`/`-qq`; and an
+  itself uses) -- STARTED and RESULT each track their own `n` counter, so
+  a test that's still running doesn't advance the other's fraction; and an
   always-on `warden: worker N didn't finish its batch (K test(s) left) --
   recreating a fresh worker to pick them up` line wherever a worker crash
   or hard-kill silently requeued the rest of its batch, previously visible
-  only as an unexplained gap before the retry's own results appeared. The
-  final `warden: distributed across N worker(s)` summary line is likewise
-  now suppressed under `-v`/`-vv` -- with `-v`, per-test worker attribution
-  is already visible throughout the run, so restating the worker count
-  again at the end is redundant. Also (the same fix `pytest-xdist` itself
-  applies in `xdist/plugin.py`'s `pytest_configure`): non-verbose runs no
-  longer show pytest's own bare `path/to/file.py ` line with the concurrent
-  replay across several workers constantly switching files -- disables
-  `TerminalReporter.showfspath`, same as xdist, so a plain dot stream shows
-  instead of that line getting orphaned (no letter ever lands on it before
-  the next file switches it away) once or twice per test. In non-verbose
-  mode, the dot/letter itself (and the occasional "[ X%]" marker) is now
-  also suppressed for the same reason our own `[done/total] ... RESULT`
+  only as an unexplained gap before the retry's own results appeared. All
+  of the above (startup banner, STARTED/RESULT lines, and the final
+  `warden: distributed across N worker(s)` summary line) are shown both by
+  default and under `-v`/`-vv` -- pytest's own verbose reporter has no
+  worker index at all, so without these lines a verbose run has zero
+  worker visibility -- and suppressed under `-q`/`-qq`, same as pytest's
+  own quiet dot-stream convention. Also (the same fix `pytest-xdist`
+  itself applies in `xdist/plugin.py`'s `pytest_configure`): non-verbose
+  runs no longer show pytest's own bare `path/to/file.py ` line with the
+  concurrent replay across several workers constantly switching files --
+  disables `TerminalReporter.showfspath`, same as xdist, so a plain dot
+  stream shows instead of that line getting orphaned (no letter ever
+  lands on it before the next file switches it away) once or twice per
+  test. In non-verbose mode, the dot/letter itself (and the occasional
+  "[ X%]" marker) is now also suppressed for the same reason our own
+  `[n/total] ... RESULT`
   line already exists -- pytest core has no public flag for "run
   `pytest_runtest_logreport` but skip just its own write" (verbosity is
   the only knob it exposes, and it's all-or-nothing across far more than
@@ -91,6 +105,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `-q`/`-qq` no longer suppressed warden's own `[n/total] worker N ->
+  nodeid ...` lines. This was a side effect of the fix that made those
+  lines always show under `-v`/`-vv`: the old guard was a bare
+  `if config.option.verbose: return`, which (since `-1` is truthy in
+  Python) coincidentally suppressed both `-v` and `-q` together, since
+  `-q` sets `verbose = -1`. Removing that guard fixed `-v` but silently
+  un-suppressed `-q` too. Replaced with an explicit `verbose < 0` check
+  (`_is_quiet`), so `-q`/`-qq` stays quiet -- matching pytest's own
+  dot-stream convention -- while `-v`/`-vv` and the default both show the
+  lines.
 - GitHub Dependabot flagged `pytest < 9.0.3` (GHSA-6w46-j5rx-g56g /
   CVE-2025-71176, predictable `/tmp/pytest-of-{user}` naming on UNIX)
   as a moderate-severity vulnerability in this repo's own `uv.lock`: with

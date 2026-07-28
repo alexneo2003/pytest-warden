@@ -622,9 +622,11 @@ def _run_controller(session):
     }
 
     scheduling = "work-stealing" if work_stealing else "static LPT"
-    _warden_write_line(
-        session, f"warden: starting run with {numprocesses} worker(s) ({scheduling} scheduling)"
-    )
+    if not _is_quiet(session.config):
+        _warden_write_line(
+            session,
+            f"warden: starting run with {numprocesses} worker(s) ({scheduling} scheduling)",
+        )
 
     session.config._warden_total_tests = len(node_ids)
     session.config._warden_progress_count = 0
@@ -1124,10 +1126,26 @@ def _suppressed_dot_write(config):
         tw.write = original_write
 
 
+def _is_quiet(config):
+    # -q/-qq (verbose < 0): warden's own lines stay suppressed, matching
+    # pytest's own quiet dot-stream convention. -v/-vv (verbose > 0) and
+    # the default (verbose == 0) both show them -- unlike the old bare
+    # `if verbose:` check this replaced, which (since -1 is truthy in
+    # Python) accidentally suppressed -q *and* -v alike, the opposite of
+    # -v's own actual goal (worker attribution that pytest's own verbose
+    # reporter doesn't carry). getattr-safe: test_progress_channel.py
+    # drives some of these call sites against a bare stand-in `config`
+    # with no `.option` at all.
+    return getattr(getattr(config, "option", None), "verbose", 0) < 0
+
+
 def _print_progress_line(session, config, worker_index, nodeid, word):
-    # Always shown, in every verbosity mode: this is warden's own
-    # worker-attributed line, distinct from whatever pytest's own terminal
-    # reporter prints under -v (which carries no worker index at all).
+    # Shown by default and under -v/-vv; suppressed under -q/-qq (see
+    # _is_quiet). This is warden's own worker-attributed line, distinct
+    # from whatever pytest's own terminal reporter prints under -v (which
+    # carries no worker index at all).
+    if _is_quiet(config):
+        return
     total = getattr(config, "_warden_total_tests", None)
     if total is None:
         return
@@ -1145,7 +1163,10 @@ def _print_started_line(session, config, worker_index, nodeid):
     # was already done. Uses its own counter (_warden_started_count) rather
     # than sharing _warden_progress_count, so a test's STARTED line and its
     # later PASSED/FAILED line each get counted once, instead of one test
-    # advancing the shared [n/total] fraction twice.
+    # advancing the shared [n/total] fraction twice. Suppressed under
+    # -q/-qq, same as _print_progress_line (see _is_quiet).
+    if _is_quiet(config):
+        return
     total = getattr(config, "_warden_total_tests", None)
     if total is None:
         return
@@ -1284,6 +1305,8 @@ def _report_never_ran(session, nodeid, message, worker_index=None):
 
 
 def pytest_terminal_summary(terminalreporter, config):
+    if _is_quiet(config):
+        return
     count = getattr(config, "_warden_worker_count", None)
     if count is not None:
         terminalreporter.write_line(f"warden: distributed across {count} worker(s)")

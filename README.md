@@ -49,7 +49,7 @@ pytest --warden --numprocesses=4 --timeout=60
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--warden`                         | Activates warden for this run. Without it, behavior is identical to bare pytest.                                                              |
 | `--numprocesses`                   | Number of worker subprocesses to distribute tests across (default: 1). Accepts an integer, a percentage of available CPU count (e.g. `50%`), `auto` (physical CPU count, requires `psutil`), or `logical` (logical CPU count). |
-| `--timeout`                        | Per-test timeout in seconds. A test exceeding it hard-kills its whole worker. Overridable per-test with `@pytest.mark.timeout(N)`.            |
+| `--timeout`                        | Per-test timeout in seconds. A test exceeding it hard-kills its whole worker. Overridable per-test with `@pytest.mark.timeout(N)`. Falls back to the `timeout` ini option (e.g. `[tool.pytest.ini_options]` in `pyproject.toml`) when not passed on the command line. |
 | `--maxfail`                        | Standard pytest flag — forwarded to workers and enforced across the whole distributed run, not just within one worker.                        |
 | `--cov=<source>`                   | Standard pytest-cov flag — coverage is measured per worker and combined into a single `.coverage` file at the rootdir.                        |
 | `--warden-history-db`              | Path to warden's SQLite timing/outcome store (default: `<rootdir>/.pytest_warden/history.sqlite3`).                                           |
@@ -61,13 +61,16 @@ pytest --warden --numprocesses=4 --timeout=60
 
 ### Terminal output
 
-By default (no `-v`/`-q`), a `--warden` run prints more than bare pytest
-does, since a plain dot stream alone wouldn't tell you which of the N
-concurrent workers is doing what:
+By default (no `-v`/`-q`) and under `-v`/`-vv`, a `--warden` run prints more
+than bare pytest does, since a plain dot stream — or even pytest's own
+verbose per-test line — alone wouldn't tell you which of the N concurrent
+workers is doing what:
 
 ```
 warden: starting run with 4 worker(s) (static LPT scheduling)
+[1/12] worker 0 -> tests/test_api.py::test_login STARTED
 [1/12] worker 0 -> tests/test_api.py::test_login PASSED
+[2/12] worker 2 -> tests/test_api.py::test_logout STARTED
 [2/12] worker 2 -> tests/test_api.py::test_logout FAILED
 warden: worker 2 didn't finish its batch (3 test(s) left) -- recreating a fresh worker to pick them up
 ...
@@ -76,22 +79,23 @@ warden: distributed across 5 worker(s)
 
 - The startup banner (worker count, scheduling mode) and the final
   `distributed across N worker(s)` line.
-- One `[done/total] worker N -> nodeid RESULT` line per finished test —
-  this is the only place a non-`-v` run shows which worker ran which
-  test and how it came out. It replaces pytest's own bare dot/letter
-  (which would otherwise still print alongside it).
+- A `[n/total] worker N -> nodeid STARTED` line the moment a worker picks
+  up a test, and a `[n/total] worker N -> nodeid RESULT` line once it
+  finishes — each with its own independent `n` counter, so a test in
+  flight doesn't advance the other one's fraction. This is the only place
+  you see which worker is running (or ran) which test and how it came
+  out — non-`-v` runs get no other per-test identification at all, and
+  `-v`/`-vv` runs get pytest's own nodeid + outcome line but with no
+  worker index. It replaces pytest's own bare dot/letter under default
+  verbosity (which would otherwise still print alongside it).
 - `warden: worker N didn't finish its batch (K test(s) left) --
 recreating a fresh worker to pick them up`, whenever a crash or
   hard-kill orphans the rest of that worker's queued tests. This applies
   identically whichever way a test ends — hard-killed, worker crash, or
   never reached even after a retry.
 
-Under `-v`/`-vv`, all of the above is suppressed: pytest's own verbose
-reporter already prints each nodeid plus its outcome on its own line, so
-warden's line would just repeat it — the trade-off is that verbose mode
-no longer shows _which worker_ ran a given test, only what ran and how it
-came out. Under `-q`/`-qq` the per-test line is suppressed too, same as
-pytest's own dot stream would be.
+Under `-q`/`-qq`, all of the above is suppressed, same as pytest's own dot
+stream would be — a quiet run stays quiet.
 
 ### A hard-killed test in your report
 
