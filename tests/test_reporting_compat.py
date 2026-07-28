@@ -22,13 +22,17 @@ def test_junitxml_records_a_hard_killed_test_with_a_readable_message(pytester):
 
 
 def test_junitxml_records_a_never_ran_remainder_test(pytester):
-    # test_a passes; test_crash1 crashes immediately, leaving [test_crash2,
-    # test_never] as a never-started remainder -- requeued once. On that
-    # retry, test_crash2 crashes again, leaving test_never as a never-started
-    # remainder of an already-retried chunk: it's reported via
-    # _report_never_ran, whose synthetic location has no real line number
-    # (`location = (fspath, None, nodeid)`) -- this exercises junitxml's
-    # tolerance for that.
+    # Stranded-remainder retries are isolated per test by default (a crash in
+    # one retried test can no longer strand its retry batch-mates), so this
+    # scenario needs --warden-dist=loadfile to keep test_crash2/test_never
+    # forced onto the same worker/retry chunk (same file = same group). test_a
+    # passes; test_crash1 crashes immediately, leaving [test_crash2,
+    # test_never] as a never-started remainder -- requeued once, together
+    # (since loadfile groups them). On that retry, test_crash2 crashes again,
+    # leaving test_never as a never-started remainder of an already-retried
+    # chunk: it's reported via _report_never_ran, whose synthetic location has
+    # no real line number (`location = (fspath, None, nodeid)`) -- this
+    # exercises junitxml's tolerance for that.
     pytester.makepyfile(
         test_mod="""
         import os
@@ -51,6 +55,7 @@ def test_junitxml_records_a_never_ran_remainder_test(pytester):
         "--numprocesses=1",
         "--warden-work-stealing",
         "--warden-chunk-size=4",
+        "--warden-dist=loadfile",
         "--junitxml=report.xml",
     )
     result.assert_outcomes(passed=1, failed=3)

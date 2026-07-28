@@ -621,15 +621,10 @@ def _run_controller(session):
         for item in session.items
     }
 
-    # Only without -v: with -v, pytest's own per-test reporting already
-    # gets a `worker N -> nodeid` line per test (see _replay_event's
-    # logstart branch), so the worker count is already implicitly visible
-    # there; without -v nothing else says how many workers are in play.
-    if not session.config.option.verbose:
-        scheduling = "work-stealing" if work_stealing else "static LPT"
-        _warden_write_line(
-            session, f"warden: starting run with {numprocesses} worker(s) ({scheduling} scheduling)"
-        )
+    scheduling = "work-stealing" if work_stealing else "static LPT"
+    _warden_write_line(
+        session, f"warden: starting run with {numprocesses} worker(s) ({scheduling} scheduling)"
+    )
 
     session.config._warden_total_tests = len(node_ids)
     session.config._warden_progress_count = 0
@@ -696,7 +691,15 @@ def _run_static_lpt(session, tmpdir, node_ids, numprocesses, timeout, history_st
             f"warden: worker {worker.worker_index} didn't finish its batch "
             f"({len(ids)} test(s) left) -- recreating a fresh worker to pick them up",
         )
-    retry_batches = [ids for _, ids in unfinished]
+    # One retry batch per stranded GROUP, not per originally-affected worker
+    # -- otherwise a hang in the first test of a re-bundled retry batch would
+    # strand its retry batch-mates too, with no second retry to save them
+    # (see the "never reached this test" report below). Splitting by group
+    # (a single nodeid, unless --warden-dist groups tests that must share a
+    # process) isolates every stranded test/group on its own retry worker.
+    retry_batches = [
+        members for _, ids in unfinished for members in _group_node_ids(ids, group_key_fn).values()
+    ]
 
     if retry_batches and not session.shouldfail:
         retry_workers, worker_count = _run_wave(
@@ -777,7 +780,14 @@ def _run_work_stealing(
                     f"warden: worker {worker.worker_index} didn't finish its batch "
                     f"({len(remainder)} test(s) left) -- recreating a fresh worker to pick them up",
                 )
-                queue.insert(0, (remainder, True))
+                # One retry chunk per stranded GROUP, not one combined chunk
+                # -- otherwise a hang in the first test of the re-bundled
+                # chunk would strand its retry chunk-mates too, with no
+                # second retry to save them (see the "never reached this
+                # test" report below). Matches the same fix in
+                # _run_static_lpt's retry_batches.
+                stranded_groups = list(_group_node_ids(remainder, group_key_fn).values())
+                queue[0:0] = [(members, True) for members in stranded_groups]
             elif remainder:
                 for nid in remainder:
                     _report_never_ran(
@@ -1114,14 +1124,9 @@ def _suppressed_dot_write(config):
 
 
 def _print_progress_line(session, config, worker_index, nodeid, word):
-    # Shown by default, but suppressed under -v: with -v, pytest's own
-    # terminal reporter already prints this exact nodeid (plus its own
-    # outcome word) on its own line -- adding ours on top would just be the
-    # same information twice. getattr-safe since test_progress_channel.py
-    # drives this against a bare stand-in `config` with no `.option` at all.
-    verbose = getattr(getattr(config, "option", None), "verbose", 0)
-    if verbose:
-        return
+    # Always shown, in every verbosity mode: this is warden's own
+    # worker-attributed line, distinct from whatever pytest's own terminal
+    # reporter prints under -v (which carries no worker index at all).
     total = getattr(config, "_warden_total_tests", None)
     if total is None:
         return
@@ -1259,8 +1264,6 @@ def _report_never_ran(session, nodeid, message, worker_index=None):
 
 
 def pytest_terminal_summary(terminalreporter, config):
-    if config.option.verbose:
-        return
     count = getattr(config, "_warden_worker_count", None)
     if count is not None:
         terminalreporter.write_line(f"warden: distributed across {count} worker(s)")
