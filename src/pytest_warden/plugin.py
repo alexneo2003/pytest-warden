@@ -61,6 +61,13 @@ def pytest_addoption(parser):
         "@pytest.mark.timeout(seconds); a test exceeding its timeout hard-kills "
         "its whole worker subprocess.",
     )
+    parser.addini(
+        "timeout",
+        default=None,
+        help="Default per-test timeout in seconds (same as --timeout), for any "
+        "test without its own @pytest.mark.timeout(seconds); used only when "
+        "--timeout isn't passed on the command line.",
+    )
     group.addoption(
         "--warden-history-db",
         dest="warden_history_db",
@@ -586,6 +593,9 @@ def _run_controller(session):
 
     numprocesses = _resolve_numprocesses(session.config.getoption("warden_numprocesses"))
     timeout = session.config.getoption("warden_timeout")
+    if timeout is None:
+        ini_timeout = session.config.getini("timeout")
+        timeout = float(ini_timeout) if ini_timeout else None
     if timeout is not None and timeout <= 0:
         # `if worker.timeout:` elsewhere is a truthiness check, so an
         # unvalidated 0 would be silently indistinguishable from --timeout

@@ -65,3 +65,6 @@ python-platform = "linux"
 [tool.ty.src]
 include = ["src/pytest_warden"]
 exclude = ["tests"]
+
+[tool.pytest.ini_options]
+timeout = 30
