@@ -628,6 +628,7 @@ def _run_controller(session):
 
     session.config._warden_total_tests = len(node_ids)
     session.config._warden_progress_count = 0
+    session.config._warden_started_count = 0
 
     _ACTIVE_WORKERS.clear()
     history_store = HistoryStore(_history_db_path(session))
@@ -1137,6 +1138,24 @@ def _print_progress_line(session, config, worker_index, nodeid, word):
     )
 
 
+def _print_started_line(session, config, worker_index, nodeid):
+    # Mirrors _print_progress_line, but fires at logstart instead of
+    # logfinish -- without this, nothing prints while a test is actually
+    # running; the worker-attributed line only ever appeared once the test
+    # was already done. Uses its own counter (_warden_started_count) rather
+    # than sharing _warden_progress_count, so a test's STARTED line and its
+    # later PASSED/FAILED line each get counted once, instead of one test
+    # advancing the shared [n/total] fraction twice.
+    total = getattr(config, "_warden_total_tests", None)
+    if total is None:
+        return
+    config._warden_started_count = getattr(config, "_warden_started_count", 0) + 1
+    _warden_write_line(
+        session,
+        f"[{config._warden_started_count}/{total}] worker {worker_index} -> {nodeid} STARTED",
+    )
+
+
 def _replay_event(session, worker, event):
     hook = session.config.hook
     config = session.config
@@ -1150,6 +1169,7 @@ def _replay_event(session, worker, event):
         # worker is spawned).
         test_timeouts = getattr(config, "_warden_test_timeouts", None) or {}
         worker.current_timeout = test_timeouts.get(event["nodeid"], worker.timeout)
+        _print_started_line(session, config, worker.worker_index, event["nodeid"])
         hook.pytest_runtest_logstart(nodeid=event["nodeid"], location=tuple(event["location"]))
     elif kind == "logreport":
         report = hook.pytest_report_from_serializable(config=config, data=event["data"])
