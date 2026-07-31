@@ -437,11 +437,21 @@ def _cov_sources(session):
 
 
 def _spawn_worker(session, batch, progress_path, cov_data_file, run_dir):
+    # Node IDs go through a pytest "@file" args file rather than straight
+    # onto the command line: with hundreds of node IDs per batch, the
+    # literal argv easily exceeds Windows' ~32K CreateProcess command-line
+    # limit and CreateProcess fails with WinError 206 ("filename or
+    # extension is too long") before the worker even starts. argparse's
+    # fromfile_prefix_chars="@" (set on pytest's own parser) expands this
+    # transparently, one node ID per line, with no length limit.
+    batch_file = os.path.splitext(progress_path)[0] + ".args"
+    with open(batch_file, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(batch))
     cmd = [
         sys.executable,
         "-m",
         "pytest",
-        *batch,
+        f"@{batch_file}",
         "-p",
         "pytest_warden.worker",
         f"--warden-progress-file={progress_path}",
