@@ -3,6 +3,8 @@ name = "pytest-warden"
 version = "0.1.0"
 description = "Windows Job Object hard-kill supervision for real pytest subprocesses — a drop-in replacement for pytest-xdist + pytest-timeout on hang-prone CI."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.10"
 dependencies = [
     "pytest>=7",
