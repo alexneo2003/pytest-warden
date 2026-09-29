@@ -126,14 +126,6 @@ jobs:
           git add pyproject.toml uv.lock CHANGELOG.md
           git commit -m "chore(release): v${{ steps.version.outputs.new-version }}"
 
-      - name: Tag release
-        run: git tag -a "v${{ steps.version.outputs.new-version }}" -m "Release v${{ steps.version.outputs.new-version }}"
-
-      - name: Push commit and tag
-        run: |
-          git push origin HEAD:main
-          git push origin "v${{ steps.version.outputs.new-version }}"
-
       - name: Build package
         run: uv build
 
@@ -147,6 +139,17 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      # Tag and push only AFTER PyPI accepted the upload: if publishing fails
+      # (e.g. trusted publisher misconfigured), no tag is left behind that
+      # would make a re-run compute the next version instead of retrying.
+      - name: Tag release
+        run: git tag -a "v${{ steps.version.outputs.new-version }}" -m "Release v${{ steps.version.outputs.new-version }}"
+
+      - name: Push commit and tag
+        run: |
+          git push origin HEAD:main
+          git push origin "v${{ steps.version.outputs.new-version }}"
 
       - name: Create GitHub Release
         env:
